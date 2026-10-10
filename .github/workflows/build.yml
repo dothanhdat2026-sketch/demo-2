@@ -1,6 +1,6 @@
 name: Build Unsigned IPA
 
-on:
+‘on’:
 workflow_dispatch:
 push:
 branches:
@@ -20,6 +20,7 @@ steps:
     run: xcodegen generate
   - name: Build app
     run: |
+      set -o pipefail
       xcodebuild \
         -project ThanhDatDeveloper.xcodeproj \
         -scheme ThanhDatDeveloper \
