@@ -1,3 +1,4 @@
+
 name: ThanhDatDeveloper
 
 options:
@@ -9,11 +10,12 @@ targets:
   ThanhDatDeveloper:
     type: application
     platform: iOS
+
     sources:
       - path: ContentView.swift
+      - path: ThanhDatDeveloperApp.swift
       - path: Assets.xcassets
-    resources:
-      - path: keymanager.json
+
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.thanhdat.developer
