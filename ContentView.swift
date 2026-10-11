@@ -1,1092 +1,509 @@
+
 import SwiftUI
 import UserNotifications
+import UIKit
 
-// MARK: - In-code password
-// This is a basic local screen gate. A password embedded in an IPA can be extracted.
-private let appPassword = "dothanhdat"
-
-private enum LicenseCheckResult {
-    case valid
-    case invalid
-}
-
-private func checkLicense(_ enteredPassword: String) -> LicenseCheckResult {
-    let cleaned = enteredPassword.trimmingCharacters(in: .whitespacesAndNewlines)
-    return cleaned == appPassword ? .valid : .invalid
-}
-
-// MARK: - Animated license gate
+// MARK: - Main Content View
 
 struct ContentView: View {
-    @AppStorage("developerLicenseValidated") private var licenseValidated = false
-    @State private var licenseKey = ""
-    @State private var isChecking = false
-    @State private var showPortfolio = false
-    @State private var animateGlow = false
-    @State private var rotateRing = false
-    @State private var floatIcon = false
-    @State private var message = ""
-    @State private var messageIsError = true
-    @FocusState private var keyFieldFocused: Bool
-
-    private let cyan = Color(red: 0.22, green: 0.91, blue: 1.0)
-    private let violet = Color(red: 0.62, green: 0.38, blue: 1.0)
+    @State private var isUnlocked = false
+    @State private var password = ""
+    @State private var showPasswordError = false
 
     var body: some View {
-        ZStack {
-            if licenseValidated || showPortfolio {
-                DeveloperPortfolioView()
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .bottom).combined(with: .opacity),
-                        removal: .opacity
-                    ))
+        Group {
+            if isUnlocked {
+                MainTabView()
             } else {
-                licenseScreen
-                    .transition(.opacity)
+                LoginView(
+                    password: $password,
+                    showPasswordError: $showPasswordError,
+                    onLogin: {
+                        if password == "dothanhdat" {
+                            isUnlocked = true
+                            showPasswordError = false
+                        } else {
+                            showPasswordError = true
+                        }
+                    }
+                )
             }
         }
         .preferredColorScheme(.dark)
-        .animation(.spring(response: 0.65, dampingFraction: 0.86), value: licenseValidated)
-        .onAppear {
-            withAnimation(.easeInOut(duration: 3.2).repeatForever(autoreverses: true)) {
-                animateGlow = true
-            }
-            withAnimation(.linear(duration: 9).repeatForever(autoreverses: false)) {
-                rotateRing = true
-            }
-            withAnimation(.easeInOut(duration: 2.0).repeatForever(autoreverses: true)) {
-                floatIcon = true
-            }
-        }
     }
+}
 
-    private var licenseScreen: some View {
-        ZStack {
-            background
+// MARK: - Login
 
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 27) {
-                    topBrand
-                    animatedEmblem
-                        .padding(.top, 12)
-                    titleBlock
-                    keyEntryCard
-                    footer
-                }
-                .padding(.horizontal, 24)
-                .padding(.top, 34)
-                .padding(.bottom, 30)
-                .frame(maxWidth: 520)
-                .frame(maxWidth: .infinity)
-            }
-        }
-        .onTapGesture {
-            keyFieldFocused = false
-        }
-    }
+struct LoginView: View {
+    @Binding var password: String
+    @Binding var showPasswordError: Bool
+    var onLogin: () -> Void
 
-    private var background: some View {
+    var body: some View {
         ZStack {
             LinearGradient(
                 colors: [
-                    Color(red: 0.018, green: 0.025, blue: 0.07),
-                    Color(red: 0.045, green: 0.025, blue: 0.12),
-                    Color(red: 0.012, green: 0.06, blue: 0.105)
+                    Color(red: 0.03, green: 0.05, blue: 0.13),
+                    Color(red: 0.10, green: 0.04, blue: 0.20)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
+            .ignoresSafeArea()
 
-            Circle()
-                .fill(cyan.opacity(animateGlow ? 0.20 : 0.07))
-                .frame(width: 290, height: 290)
-                .blur(radius: 95)
-                .offset(x: animateGlow ? 150 : 95, y: -240)
+            VStack(spacing: 24) {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: 44, weight: .bold))
+                    .foregroundStyle(.cyan)
+                    .padding(25)
+                    .background(.white.opacity(0.07))
+                    .clipShape(RoundedRectangle(cornerRadius: 24))
 
-            Circle()
-                .fill(violet.opacity(animateGlow ? 0.23 : 0.08))
-                .frame(width: 310, height: 310)
-                .blur(radius: 100)
-                .offset(x: animateGlow ? -140 : -85, y: 250)
+                Text("Thanh Dat Developer")
+                    .font(.system(size: 28, weight: .bold))
+                    .multilineTextAlignment(.center)
 
-            // Subtle developer-style grid.
-            Canvas { context, size in
-                var path = Path()
-                stride(from: 0.0, through: size.width, by: 30.0).forEach { x in
-                    path.move(to: CGPoint(x: x, y: 0))
-                    path.addLine(to: CGPoint(x: x, y: size.height))
-                }
-                stride(from: 0.0, through: size.height, by: 30.0).forEach { y in
-                    path.move(to: CGPoint(x: 0, y: y))
-                    path.addLine(to: CGPoint(x: size.width, y: y))
-                }
-                context.stroke(path, with: .color(.white.opacity(0.025)), lineWidth: 0.5)
-            }
-        }
-        .ignoresSafeArea()
-    }
+                Text("DEVELOPER TOOLS")
+                    .font(.caption.weight(.semibold))
+                    .tracking(4)
+                    .foregroundStyle(.cyan)
 
-    private var topBrand: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "chevron.left.forwardslash.chevron.right")
-                .font(.system(size: 15, weight: .bold))
-                .foregroundStyle(cyan)
-                .frame(width: 42, height: 42)
-                .background(cyan.opacity(0.11), in: RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(cyan.opacity(0.28), lineWidth: 1))
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text("THANH DAT")
-                    .font(.system(size: 13, weight: .black, design: .rounded))
-                    .tracking(2.5)
-                    .foregroundStyle(.white)
-                Text("DEVELOPER ACCESS")
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .tracking(1.5)
-                    .foregroundStyle(.white.opacity(0.45))
-            }
-
-            Spacer()
-
-            HStack(spacing: 6) {
-                Circle().fill(Color.green).frame(width: 6, height: 6)
-                Text("SECURE")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.6))
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .background(.white.opacity(0.05), in: Capsule())
-        }
-    }
-
-    private var animatedEmblem: some View {
-        ZStack {
-            Circle()
-                .stroke(cyan.opacity(0.09), lineWidth: 1)
-                .frame(width: 204, height: 204)
-                .scaleEffect(animateGlow ? 1.08 : 0.92)
-
-            Circle()
-                .trim(from: 0.06, to: 0.78)
-                .stroke(
-                    AngularGradient(colors: [cyan, violet, .clear, cyan], center: .center),
-                    style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
-                )
-                .frame(width: 178, height: 178)
-                .rotationEffect(.degrees(rotateRing ? 360 : 0))
-
-            Circle()
-                .trim(from: 0.20, to: 0.64)
-                .stroke(violet.opacity(0.75), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
-                .frame(width: 150, height: 150)
-                .rotationEffect(.degrees(rotateRing ? -240 : 0))
-
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [cyan.opacity(0.22), violet.opacity(0.10), .clear],
-                        center: .center,
-                        startRadius: 8,
-                        endRadius: 82
-                    )
-                )
-                .frame(width: 145, height: 145)
-
-            Image(systemName: "lock.shield.fill")
-                .font(.system(size: 53, weight: .light))
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(.white, cyan)
-                .shadow(color: cyan.opacity(animateGlow ? 0.65 : 0.25), radius: animateGlow ? 24 : 10)
-                .offset(y: floatIcon ? -5 : 5)
-
-            Circle()
-                .fill(cyan)
-                .frame(width: 7, height: 7)
-                .shadow(color: cyan, radius: 8)
-                .offset(x: 87, y: -27)
-
-            Circle()
-                .fill(violet)
-                .frame(width: 5, height: 5)
-                .shadow(color: violet, radius: 7)
-                .offset(x: -75, y: 47)
-        }
-        .frame(height: 210)
-        .accessibilityLabel("Animated license security emblem")
-    }
-
-    private var titleBlock: some View {
-        VStack(spacing: 11) {
-            Text("ACCESS GATE")
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .tracking(3.5)
-                .foregroundStyle(cyan)
-
-            Text("Unlock your\ncreative space.")
-                .font(.system(size: 34, weight: .black, design: .rounded))
-                .multilineTextAlignment(.center)
-                .lineSpacing(1)
-                .foregroundStyle(.white)
-
-            Text("Nhập mật khẩu để truy cập hồ sơ developer.")
-                .font(.system(size: 13))
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.white.opacity(0.58))
-                .padding(.top, 2)
-        }
-    }
-
-    private var keyEntryCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 8) {
-                Image(systemName: "key.horizontal.fill")
-                    .foregroundStyle(cyan)
-                Text("PASSWORD AUTHENTICATION")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .tracking(1.2)
-                    .foregroundStyle(.white.opacity(0.85))
-                Spacer()
-                Image(systemName: "wave.3.right")
-                    .foregroundStyle(violet)
-            }
-
-            HStack(spacing: 11) {
-                Image(systemName: "key.fill")
-                    .font(.system(size: 15))
-                    .foregroundStyle(cyan)
-                    .frame(width: 20)
-
-                SecureField("ENTER-PASSWORD", text: $licenseKey)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .textInputAutocapitalization(.characters)
+                SecureField("Nhập mật khẩu / Enter password", text: $password)
+                    .textContentType(.password)
+                    .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                    .submitLabel(.go)
-                    .focused($keyFieldFocused)
-                    .onSubmit(validateKey)
-                    .tint(cyan)
-                    .foregroundStyle(.white)
-                    .accessibilityLabel("Mật khẩu")
-
-                if !licenseKey.isEmpty {
-                    Button {
-                        licenseKey = ""
-                        message = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.white.opacity(0.4))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 15)
-            .padding(.vertical, 16)
-            .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 15))
-            .overlay {
-                RoundedRectangle(cornerRadius: 15)
-                    .stroke(keyFieldFocused ? cyan.opacity(0.8) : .white.opacity(0.11), lineWidth: 1)
-                    .shadow(color: keyFieldFocused ? cyan.opacity(0.18) : .clear, radius: 10)
-            }
-            .animation(.easeOut(duration: 0.2), value: keyFieldFocused)
-
-            Button(action: validateKey) {
-                HStack(spacing: 10) {
-                    if isChecking {
-                        ProgressView().tint(.black)
-                    } else {
-                        Image(systemName: "lock.open.fill")
-                            .font(.system(size: 13, weight: .bold))
+                    .padding()
+                    .background(.white.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14)
+                            .stroke(.cyan.opacity(0.5), lineWidth: 1)
                     }
 
-                    Text(isChecking ? "VERIFYING PASSWORD..." : "VERIFY & CONTINUE")
-                        .font(.system(size: 11, weight: .black, design: .monospaced))
-                        .tracking(1.2)
-
-                    Spacer()
-
-                    Image(systemName: "arrow.right")
-                        .font(.system(size: 13, weight: .bold))
+                if showPasswordError {
+                    Text("Mật khẩu không đúng / Incorrect password")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
                 }
-                .foregroundStyle(Color.black.opacity(0.9))
-                .padding(.horizontal, 17)
-                .frame(maxWidth: .infinity)
-                .frame(height: 54)
-                .background(
-                    LinearGradient(
-                        colors: [cyan, Color(red: 0.35, green: 0.73, blue: 1.0), Color(red: 0.67, green: 0.48, blue: 1.0)],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    ),
-                    in: RoundedRectangle(cornerRadius: 15)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 15)
-                        .stroke(.white.opacity(animateGlow ? 0.48 : 0.12), lineWidth: 1)
-                }
-                .shadow(color: cyan.opacity(animateGlow ? 0.25 : 0.08), radius: animateGlow ? 18 : 8, y: 5)
-            }
-            .buttonStyle(PressScaleStyle())
-            .disabled(isChecking || licenseKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .opacity(licenseKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.55 : 1)
 
-            if !message.isEmpty {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: messageIsError ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
-                    Text(message)
-                        .fixedSize(horizontal: false, vertical: true)
+                Button(action: onLogin) {
+                    HStack {
+                        Text("Mở ứng dụng / Unlock")
+                        Image(systemName: "arrow.right")
+                    }
+                    .fontWeight(.bold)
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(
+                        LinearGradient(
+                            colors: [.cyan, .blue],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .foregroundStyle(.black)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
                 }
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(messageIsError ? Color.orange : cyan)
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background((messageIsError ? Color.orange : cyan).opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
 
-            HStack(spacing: 7) {
-                Image(systemName: "info.circle")
-                Text("Mật khẩu được xác minh trong ứng dụng")
+                Text("Thanh Dat Developer • iOS")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .font(.system(size: 10))
-            .foregroundStyle(.white.opacity(0.42))
+            .padding(28)
         }
-        .padding(19)
-        .background {
-            RoundedRectangle(cornerRadius: 23)
-                .fill(.ultraThinMaterial.opacity(0.72))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 23)
-                        .fill(LinearGradient(
-                            colors: [.white.opacity(0.065), .white.opacity(0.015)],
+    }
+}
+
+// MARK: - Main Tabs
+
+struct MainTabView: View {
+    @AppStorage("appLanguage") private var appLanguage = "vi"
+
+    var body: some View {
+        TabView {
+            UtilitiesView()
+                .tabItem {
+                    Label(
+                        appLanguage == "vi" ? "Tiện ích" : "Utilities",
+                        systemImage: "square.grid.2x2"
+                    )
+                }
+
+            SettingsView()
+                .tabItem {
+                    Label(
+                        appLanguage == "vi" ? "Cài đặt" : "Settings",
+                        systemImage: "gearshape"
+                    )
+                }
+        }
+        .tint(.cyan)
+    }
+}
+
+// MARK: - Utilities
+
+struct UtilitiesView: View {
+    @AppStorage("appLanguage") private var appLanguage = "vi"
+
+    @State private var notificationTitle = ""
+    @State private var notificationBody = ""
+    @State private var delaySeconds = 1
+    @State private var statusMessage = ""
+    @State private var showStatus = false
+
+    private var isVietnamese: Bool {
+        appLanguage == "vi"
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(isVietnamese ? "Xin chào 👋" : "Welcome 👋")
+                            .font(.title2.weight(.bold))
+
+                        Text(
+                            isVietnamese
+                            ? "Chào mừng đến với Thanh Dat Developer."
+                            : "Welcome to Thanh Dat Developer."
+                        )
+                        .foregroundStyle(.secondary)
+
+                        Text("DEVELOPER TOOLKIT")
+                            .font(.caption.weight(.bold))
+                            .tracking(2)
+                            .foregroundStyle(.cyan)
+                            .padding(.top, 4)
+                    }
+                    .padding(20)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        LinearGradient(
+                            colors: [
+                                Color.cyan.opacity(0.18),
+                                Color.blue.opacity(0.08)
+                            ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
-                        ))
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 23)
-                        .stroke(
-                            LinearGradient(colors: [cyan.opacity(0.32), violet.opacity(0.22), .white.opacity(0.06)],
-                                           startPoint: .topLeading, endPoint: .bottomTrailing),
-                            lineWidth: 1
                         )
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 22))
+
+                    HStack(spacing: 12) {
+                        Image(systemName: "bell.badge.fill")
+                            .font(.title2)
+                            .foregroundStyle(.cyan)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(
+                                isVietnamese
+                                ? "Tạo thông báo"
+                                : "Notification Creator"
+                            )
+                            .font(.headline)
+
+                            Text(
+                                isVietnamese
+                                ? "Lên lịch thông báo trên thiết bị"
+                                : "Schedule a local device notification"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text(isVietnamese ? "Tiêu đề" : "Title")
+                            .font(.subheadline.weight(.semibold))
+
+                        TextField(
+                            isVietnamese
+                            ? "Nhập tiêu đề thông báo"
+                            : "Enter notification title",
+                            text: $notificationTitle
+                        )
+                        .padding(13)
+                        .background(.white.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                        Text(isVietnamese ? "Nội dung" : "Message")
+                            .font(.subheadline.weight(.semibold))
+
+                        TextEditor(text: $notificationBody)
+                            .scrollContentBackground(.hidden)
+                            .frame(minHeight: 100)
+                            .padding(8)
+                            .background(.white.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                        Text(isVietnamese ? "Thời gian gửi" : "Delivery time")
+                            .font(.subheadline.weight(.semibold))
+
+                        Picker(
+                            isVietnamese ? "Thời gian" : "Delay",
+                            selection: $delaySeconds
+                        ) {
+                            Text(isVietnamese ? "Sau 1 giây" : "After 1 second")
+                                .tag(1)
+
+                            Text(isVietnamese ? "Sau 5 giây" : "After 5 seconds")
+                                .tag(5)
+
+                            Text(isVietnamese ? "Sau 1 phút" : "After 1 minute")
+                                .tag(60)
+                        }
+                        .pickerStyle(.segmented)
+
+                        Button {
+                            scheduleNotification()
+                        } label: {
+                            Label(
+                                isVietnamese
+                                ? "Tạo thông báo"
+                                : "Schedule Notification",
+                                systemImage: "bell.badge"
+                            )
+                            .fontWeight(.bold)
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(.cyan)
+                            .foregroundStyle(.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                        }
+
+                        if showStatus {
+                            Text(statusMessage)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(18)
+                    .background(.white.opacity(0.045))
+                    .clipShape(RoundedRectangle(cornerRadius: 20))
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(
+                            isVietnamese
+                            ? "Khu vực tiện ích"
+                            : "Utilities Hub",
+                            systemImage: "puzzlepiece.extension"
+                        )
+                        .font(.headline)
+
+                        Text(
+                            isVietnamese
+                            ? "Bạn có thể thêm các chức năng mới vào khu vực này trong những bản cập nhật tiếp theo."
+                            : "Add more features to this area in future updates."
+                        )
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding(18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.white.opacity(0.045))
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
                 }
-        }
-        .shadow(color: violet.opacity(0.08), radius: 28, y: 10)
-    }
-
-    private var footer: some View {
-        VStack(spacing: 9) {
-            HStack(spacing: 7) {
-                Image(systemName: "checkmark.shield.fill")
-                    .foregroundStyle(cyan)
-                Text("AUTHORIZED USERS ONLY")
-                    .foregroundStyle(.white.opacity(0.5))
+                .padding()
             }
-            .font(.system(size: 9, weight: .bold, design: .monospaced))
-            .tracking(1.2)
-
-            Text("© 2026 Đỗ Thành Đạt • Developer Access")
-                .font(.system(size: 10))
-                .foregroundStyle(.white.opacity(0.3))
+            .background(Color(red: 0.035, green: 0.045, blue: 0.09))
+            .navigationTitle(
+                isVietnamese ? "Tiện ích" : "Utilities"
+            )
         }
-        .padding(.top, 2)
     }
 
-    private func validateKey() {
-        keyFieldFocused = false
-        guard !isChecking else { return }
+    private func scheduleNotification() {
+        let title = notificationTitle.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let message = notificationBody.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
 
-        let cleanedKey = licenseKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanedKey.isEmpty else {
-            setMessage("Vui lòng nhập mật khẩu.", isError: true)
+        guard !title.isEmpty, !message.isEmpty else {
+            statusMessage = isVietnamese
+                ? "Vui lòng nhập cả tiêu đề và nội dung."
+                : "Please enter both a title and a message."
+            showStatus = true
             return
         }
 
-        isChecking = true
-        message = ""
-
-        // Brief delay gives the animated verification state time to appear.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
-            let result = checkLicense(cleanedKey)
-            isChecking = false
-
-            switch result {
-            case .valid:
-                messageIsError = false
-                message = "Xác minh thành công. Đang mở giao diện..."
-                withAnimation(.spring(response: 0.6, dampingFraction: 0.82)) {
-                    licenseValidated = true
-                    showPortfolio = true
+        UNUserNotificationCenter.current().requestAuthorization(
+            options: [.alert, .sound, .badge]
+        ) { granted, error in
+            if let error = error {
+                DispatchQueue.main.async {
+                    statusMessage = error.localizedDescription
+                    showStatus = true
                 }
-            case .invalid:
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.55)) {
-                    setMessage("Mật khẩu không chính xác. Vui lòng thử lại.", isError: true)
+                return
+            }
+
+            guard granted else {
+                DispatchQueue.main.async {
+                    statusMessage = isVietnamese
+                        ? "Bạn chưa cấp quyền thông báo. Hãy bật quyền trong Cài đặt iPhone."
+                        : "Notification permission denied. Enable it in iPhone Settings."
+                    showStatus = true
                 }
-            }
-        }
-    }
-
-    private func setMessage(_ text: String, isError: Bool) {
-        withAnimation(.easeInOut(duration: 0.22)) {
-            message = text
-            messageIsError = isError
-        }
-    }
-}
-
-private struct PressScaleStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.975 : 1)
-            .opacity(configuration.isPressed ? 0.9 : 1)
-            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
-    }
-}
-
-
-struct DeveloperPortfolioView: View {
-    @State private var glow = false
-    @State private var showContent = false
-    @State private var selectedTab = 0
-    @State private var pulse = false
-
-    private let cyan = Color(red: 0.22, green: 0.91, blue: 1.0)
-    private let violet = Color(red: 0.62, green: 0.38, blue: 1.0)
-
-    var body: some View {
-        ZStack {
-            // Background fills the entire device screen, including safe areas.
-            background
-                .ignoresSafeArea()
-
-            VStack(spacing: 0) {
-                header
-                    .padding(.horizontal, 22)
-                    .padding(.top, 8)
-
-                ScrollView(showsIndicators: false) {
-                    VStack(spacing: 22) {
-                        hero
-                        stats
-                        skills
-                        featuredProject
-                        NotificationComposerView()
-                        contactCard
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 20)
-                    .padding(.bottom, 26)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                bottomBar
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .opacity(showContent ? 1 : 0)
-            .offset(y: showContent ? 0 : 18)
-        }
-        .preferredColorScheme(.dark)
-        .onAppear {
-            withAnimation(.easeOut(duration: 0.8)) {
-                showContent = true
-            }
-            withAnimation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true)) {
-                glow = true
-            }
-            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
-                pulse = true
-            }
-        }
-    }
-
-    private var background: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.025, green: 0.035, blue: 0.09),
-                    Color(red: 0.055, green: 0.035, blue: 0.14),
-                    Color(red: 0.015, green: 0.065, blue: 0.12)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            Circle()
-                .fill(cyan.opacity(glow ? 0.22 : 0.09))
-                .frame(width: 270, height: 270)
-                .blur(radius: 90)
-                .offset(x: glow ? 140 : 100, y: -250)
-
-            Circle()
-                .fill(violet.opacity(glow ? 0.23 : 0.10))
-                .frame(width: 300, height: 300)
-                .blur(radius: 100)
-                .offset(x: glow ? -130 : -80, y: 120)
-
-            VStack(spacing: 28) {
-                ForEach(0..<18, id: \.self) { index in
-                    Rectangle()
-                        .fill(.white.opacity(0.025))
-                        .frame(height: 1)
-                        .offset(y: CGFloat(index) * 0)
-                }
-            }
-        }
-        .overlay {
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.14)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .fill(cyan.opacity(0.15))
-                    .frame(width: 38, height: 38)
-                Image(systemName: "chevron.left.forwardslash.chevron.right")
-                    .font(.system(size: 14, weight: .black))
-                    .foregroundStyle(cyan)
+                return
             }
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text("THANH DAT")
-                    .font(.system(size: 13, weight: .black, design: .rounded))
-                    .tracking(2.2)
-                    .foregroundStyle(.white)
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 5, height: 5)
-                        .scaleEffect(pulse ? 1.25 : 0.8)
-                    Text("DEVELOPER PORTFOLIO")
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .tracking(1.2)
-                        .foregroundStyle(.white.opacity(0.55))
-                }
-            }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = message
+            content.sound = .default
 
-            Spacer()
-
-            Image(systemName: "sparkle")
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(cyan)
-                .padding(11)
-                .background(.white.opacity(0.06), in: Circle())
-                .overlay(Circle().stroke(.white.opacity(0.10), lineWidth: 1))
-        }
-        .padding(.top, 54)
-        .padding(.bottom, 10)
-    }
-
-    private var hero: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                Text("HELLO, WORLD")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .tracking(2.8)
-                    .foregroundStyle(cyan)
-                Spacer()
-                Text("01 / PROFILE")
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.35))
-            }
-
-            HStack(alignment: .center, spacing: 16) {
-                ZStack {
-                    Circle()
-                        .stroke(
-                            AngularGradient(colors: [cyan, violet, .clear, cyan], center: .center),
-                            lineWidth: 2
-                        )
-                        .frame(width: 94, height: 94)
-                        .rotationEffect(.degrees(glow ? 360 : 0))
-
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [Color(red: 0.10, green: 0.23, blue: 0.39), Color(red: 0.16, green: 0.08, blue: 0.30)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 82, height: 82)
-
-                    Image(systemName: "person.crop.square.fill")
-                        .font(.system(size: 42, weight: .light))
-                        .foregroundStyle(
-                            LinearGradient(colors: [.white, cyan], startPoint: .top, endPoint: .bottom)
-                        )
-                }
-                .shadow(color: cyan.opacity(0.22), radius: 18)
-
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("Đỗ Thành Đạt")
-                        .font(.system(size: 27, weight: .black, design: .rounded))
-                        .foregroundStyle(.white)
-                        .minimumScaleFactor(0.75)
-                        .lineLimit(1)
-
-                    Text("iOS Developer")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(cyan)
-
-                    Text("Building ideas into apps.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.57))
-                }
-                Spacer(minLength: 0)
-            }
-
-            Text("Mình yêu thích công nghệ, thiết kế giao diện và tạo ra trải nghiệm iOS hiện đại.")
-                .font(.system(size: 13))
-                .lineSpacing(5)
-                .foregroundStyle(.white.opacity(0.72))
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 8) {
-                Label("SwiftUI", systemImage: "swift")
-                Text("•").foregroundStyle(.white.opacity(0.3))
-                Label("Creative code", systemImage: "bolt.fill")
-            }
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(.white.opacity(0.82))
-        }
-        .padding(21)
-        .background {
-            RoundedRectangle(cornerRadius: 27)
-                .fill(.ultraThinMaterial.opacity(0.7))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 27)
-                        .fill(
-                            LinearGradient(
-                                colors: [.white.opacity(0.07), .white.opacity(0.015)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 27)
-                        .stroke(
-                            LinearGradient(colors: [cyan.opacity(0.48), violet.opacity(0.18), .white.opacity(0.06)],
-                                           startPoint: .topLeading, endPoint: .bottomTrailing),
-                            lineWidth: 1
-                        )
-                }
-        }
-        .shadow(color: cyan.opacity(glow ? 0.12 : 0.04), radius: 25)
-    }
-
-    private var stats: some View {
-        HStack(spacing: 10) {
-            statCard(number: "12+", title: "PROJECTS", icon: "square.stack.3d.up.fill", color: cyan)
-            statCard(number: "iOS", title: "PLATFORM", icon: "iphone", color: violet)
-            statCard(number: "∞", title: "IDEAS", icon: "lightbulb.fill", color: Color.mint)
-        }
-    }
-
-    private func statCard(number: String, title: String, icon: String, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(color)
-                .frame(width: 32, height: 32)
-                .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-
-            Text(number)
-                .font(.system(size: 23, weight: .black, design: .rounded))
-                .foregroundStyle(.white)
-
-            Text(title)
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .tracking(1.2)
-                .foregroundStyle(.white.opacity(0.43))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 19))
-        .overlay(RoundedRectangle(cornerRadius: 19).stroke(.white.opacity(0.08), lineWidth: 1))
-    }
-
-    private var skills: some View {
-        VStack(alignment: .leading, spacing: 17) {
-            sectionHeader("CORE SKILLS", subtitle: "02 / TOOLKIT")
-
-            skillRow(name: "SwiftUI & Interface Design", value: 0.88, color: cyan)
-            skillRow(name: "iOS Development", value: 0.80, color: violet)
-            skillRow(name: "Creative Problem Solving", value: 0.92, color: Color.mint)
-        }
-        .padding(20)
-        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 23))
-        .overlay(RoundedRectangle(cornerRadius: 23).stroke(.white.opacity(0.08), lineWidth: 1))
-    }
-
-    private func skillRow(name: String, value: CGFloat, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(name)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.83))
-                Spacer()
-                Text("\(Int(value * 100))%")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundStyle(color)
-            }
-
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.white.opacity(0.08))
-                    Capsule()
-                        .fill(LinearGradient(colors: [color.opacity(0.65), color], startPoint: .leading, endPoint: .trailing))
-                        .frame(width: proxy.size.width * (showContent ? value : 0))
-                        .shadow(color: color.opacity(0.35), radius: 6)
-                }
-            }
-            .frame(height: 5)
-            .animation(.spring(response: 1.2, dampingFraction: 0.82).delay(0.25), value: showContent)
-        }
-    }
-
-    private var featuredProject: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            sectionHeader("FEATURED WORK", subtitle: "03 / PROJECT")
-
-            HStack(spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 16)
-                        .fill(LinearGradient(colors: [cyan.opacity(0.25), violet.opacity(0.23)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                        .frame(width: 68, height: 72)
-                    Image(systemName: "app.dashed")
-                        .font(.system(size: 28, weight: .medium))
-                        .foregroundStyle(.white)
-                }
-
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("NextGen iOS")
-                        .font(.system(size: 16, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                    Text("Ứng dụng • Giao diện hiện đại")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.55))
-                    HStack(spacing: 6) {
-                        techPill("SWIFTUI")
-                        techPill("MOBILE")
-                    }
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(cyan)
-            }
-            .padding(15)
-            .background(.black.opacity(0.16), in: RoundedRectangle(cornerRadius: 19))
-            .overlay(RoundedRectangle(cornerRadius: 19).stroke(.white.opacity(0.07), lineWidth: 1))
-        }
-    }
-
-    private func techPill(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 8, weight: .bold, design: .monospaced))
-            .tracking(0.7)
-            .foregroundStyle(cyan)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(cyan.opacity(0.10), in: Capsule())
-    }
-
-    private var contactCard: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "paperplane.fill")
-                .font(.system(size: 18))
-                .foregroundStyle(cyan)
-                .frame(width: 43, height: 43)
-                .background(cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("LET’S CONNECT")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .tracking(1.4)
-                    .foregroundStyle(cyan)
-                Text("Cùng tạo nên điều tuyệt vời.")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.78))
-            }
-
-            Spacer()
-
-            Image(systemName: "arrow.right")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(.white.opacity(0.8))
-        }
-        .padding(16)
-        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(cyan.opacity(0.18), lineWidth: 1))
-    }
-
-    private func sectionHeader(_ title: String, subtitle: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(title)
-                .font(.system(size: 12, weight: .black, design: .rounded))
-                .tracking(1.5)
-                .foregroundStyle(.white)
-            Spacer()
-            Text(subtitle)
-                .font(.system(size: 9, weight: .medium, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.38))
-        }
-    }
-
-    private var bottomBar: some View {
-        HStack(spacing: 0) {
-            tabItem(index: 0, icon: "square.grid.2x2.fill", title: "Home")
-            tabItem(index: 1, icon: "folder.fill", title: "Projects")
-            tabItem(index: 2, icon: "chart.bar.fill", title: "Skills")
-            tabItem(index: 3, icon: "paperplane.fill", title: "Contact")
-        }
-        .padding(.top, 12)
-        .padding(.bottom, 30)
-        .background {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .overlay(alignment: .top) {
-                    Rectangle().fill(.white.opacity(0.09)).frame(height: 1)
-                }
-                .ignoresSafeArea(edges: .bottom)
-        }
-    }
-
-    private func tabItem(index: Int, icon: String, title: String) -> some View {
-        Button {
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.65)) {
-                selectedTab = index
-            }
-        } label: {
-            VStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.system(size: 16, weight: .semibold))
-                    .scaleEffect(selectedTab == index ? 1.12 : 1.0)
-                Text(title)
-                    .font(.system(size: 9, weight: selectedTab == index ? .bold : .medium))
-            }
-            .foregroundStyle(selectedTab == index ? cyan : .white.opacity(0.42))
-            .frame(maxWidth: .infinity)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-
-// MARK: - Local notification composer
-private final class LocalNotificationManager: NSObject, UNUserNotificationCenterDelegate {
-    static let shared = LocalNotificationManager()
-    private let center = UNUserNotificationCenter.current()
-
-    private override init() {
-        super.init()
-        center.delegate = self
-    }
-
-    func schedule(title: String, body: String, delaySeconds: Int) async throws {
-        let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
-        guard granted else { throw LocalNotificationError.permissionDenied }
-
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-
-        let trigger: UNNotificationTrigger?
-        if delaySeconds <= 0 {
-            trigger = nil // Deliver as soon as iOS can present it.
-        } else {
-            trigger = UNTimeIntervalNotificationTrigger(
-                timeInterval: TimeInterval(max(1, delaySeconds)),
+            let trigger = UNTimeIntervalNotificationTrigger(
+                timeInterval: TimeInterval(delaySeconds),
                 repeats: false
             )
-        }
 
-        let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
-            content: content,
-            trigger: trigger
-        )
-        try await center.add(request)
-    }
+            let request = UNNotificationRequest(
+                identifier: UUID().uuidString,
+                content: content,
+                trigger: trigger
+            )
 
-    func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification,
-        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
-    ) {
-        completionHandler([.banner, .sound, .list])
-    }
-}
-
-private enum LocalNotificationError: LocalizedError {
-    case permissionDenied
-
-    var errorDescription: String? {
-        switch self {
-        case .permissionDenied:
-            return "Bạn chưa cấp quyền thông báo. Hãy bật trong Cài đặt iPhone."
+            UNUserNotificationCenter.current().add(request) { error in
+                DispatchQueue.main.async {
+                    if let error = error {
+                        statusMessage = error.localizedDescription
+                    } else {
+                        statusMessage = isVietnamese
+                            ? "Đã lên lịch thông báo. Hãy kiểm tra quyền thông báo trên thiết bị."
+                            : "Notification scheduled. Check notification permissions on your device."
+                        notificationTitle = ""
+                        notificationBody = ""
+                    }
+                    showStatus = true
+                }
+            }
         }
     }
 }
 
-struct NotificationComposerView: View {
-    @State private var titleText = "Thông báo từ Thanh Dat"
-    @State private var bodyText = "Đây là nội dung thông báo thử nghiệm."
-    @State private var selectedDelay = 0
-    @State private var isScheduling = false
-    @State private var statusMessage = ""
-    @State private var statusIsError = false
+// MARK: - Settings
 
-    private let cyan = Color(red: 0.22, green: 0.91, blue: 1.0)
-    private let violet = Color(red: 0.62, green: 0.38, blue: 1.0)
-    private let delays: [(title: String, seconds: Int)] = [
-        ("Ngay lập tức", 0),
-        ("Sau 5 giây", 5),
-        ("Sau 1 phút", 60)
-    ]
+struct SettingsView: View {
+    @AppStorage("appLanguage") private var appLanguage = "vi"
+
+    private var isVietnamese: Bool {
+        appLanguage == "vi"
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            HStack(spacing: 9) {
-                Image(systemName: "bell.badge.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(cyan)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("NOTIFICATION CENTER")
-                        .font(.system(size: 11, weight: .black, design: .monospaced))
-                        .tracking(1.1)
-                        .foregroundStyle(.white)
-                    Text("Tạo thông báo trên iPhone")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.5))
-                }
-                Spacer()
-            }
-
-            VStack(alignment: .leading, spacing: 7) {
-                Text("TIÊU ĐỀ")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .tracking(1.1)
-                    .foregroundStyle(cyan)
-                TextField("Thông báo từ Thanh Dat", text: $titleText)
-                    .textInputAutocapitalization(.sentences)
-                    .autocorrectionDisabled(false)
-                    .padding(12)
-                    .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.1), lineWidth: 1))
-            }
-
-            VStack(alignment: .leading, spacing: 7) {
-                Text("NỘI DUNG")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .tracking(1.1)
-                    .foregroundStyle(cyan)
-                TextEditor(text: $bodyText)
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 82)
-                    .padding(7)
-                    .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.1), lineWidth: 1))
-                    .foregroundStyle(.white)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("THỜI GIAN HIỂN THỊ")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .tracking(1.1)
-                    .foregroundStyle(cyan)
-                Picker("Thời gian", selection: $selectedDelay) {
-                    ForEach(delays.indices, id: \.self) { index in
-                        Text(delays[index].title).tag(index)
+        NavigationStack {
+            List {
+                Section(
+                    isVietnamese ? "Giao diện" : "Appearance"
+                ) {
+                    Picker(
+                        isVietnamese ? "Ngôn ngữ" : "Language",
+                        selection: $appLanguage
+                    ) {
+                        Text("Tiếng Việt").tag("vi")
+                        Text("English").tag("en")
                     }
+                    .pickerStyle(.menu)
                 }
-                .pickerStyle(.segmented)
-                .tint(violet)
-            }
 
-            Button {
-                sendNotification()
-            } label: {
-                HStack(spacing: 9) {
-                    if isScheduling {
-                        ProgressView().tint(.black)
-                    } else {
-                        Image(systemName: "paperplane.fill")
+                Section(
+                    isVietnamese ? "Thông tin thiết bị" : "Device Information"
+                ) {
+                    infoRow(
+                        title: isVietnamese ? "Thiết bị" : "Device",
+                        value: UIDevice.current.model,
+                        symbol: "iphone"
+                    )
+
+                    infoRow(
+                        title: isVietnamese ? "Hệ điều hành" : "Operating System",
+                        value: "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)",
+                        symbol: "gear"
+                    )
+                }
+
+                Section(
+                    isVietnamese ? "Bản quyền" : "Copyright"
+                ) {
+                    infoRow(
+                        title: "Application",
+                        value: "Thanh Dat Developer",
+                        symbol: "app"
+                    )
+
+                    infoRow(
+                        title: isVietnamese ? "Tác giả" : "Developer",
+                        value: "Đỗ Thành Đạt",
+                        symbol: "person.crop.circle"
+                    )
+
+                    infoRow(
+                        title: isVietnamese ? "Bản quyền" : "Copyright",
+                        value: "© 2026 Đỗ Thành Đạt",
+                        symbol: "c.circle"
+                    )
+
+                    infoRow(
+                        title: isVietnamese ? "Phiên bản" : "Version",
+                        value: "1.0.0",
+                        symbol: "number"
+                    )
+                }
+
+                Section {
+                    HStack {
+                        Spacer()
+
+                        VStack(spacing: 8) {
+                            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                                .font(.title)
+                                .foregroundStyle(.cyan)
+
+                            Text("Thanh Dat Developer")
+                                .font(.headline)
+
+                            Text("Made for developers")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
                     }
-                    Text(isScheduling ? "ĐANG TẠO THÔNG BÁO..." : "TẠO THÔNG BÁO")
-                        .font(.system(size: 11, weight: .black, design: .monospaced))
-                        .tracking(1)
-                    Spacer()
-                    Image(systemName: "arrow.right")
+                    .padding(.vertical, 16)
+                    .listRowBackground(Color.clear)
                 }
-                .foregroundStyle(.black.opacity(0.9))
-                .padding(.horizontal, 15)
-                .frame(maxWidth: .infinity)
-                .frame(height: 48)
-                .background(LinearGradient(colors: [cyan, Color(red: 0.67, green: 0.48, blue: 1.0)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 13))
             }
-            .buttonStyle(PressScaleStyle())
-            .disabled(isScheduling || titleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            .opacity(titleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || bodyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.55 : 1)
-
-            if !statusMessage.isEmpty {
-                Label(statusMessage, systemImage: statusIsError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(statusIsError ? Color.orange : cyan)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Text("Lần đầu sử dụng, iOS sẽ hỏi quyền hiển thị thông báo.")
-                .font(.system(size: 10))
-                .foregroundStyle(.white.opacity(0.42))
-        }
-        .padding(17)
-        .background {
-            RoundedRectangle(cornerRadius: 21)
-                .fill(.ultraThinMaterial)
-                .overlay(RoundedRectangle(cornerRadius: 21).fill(.white.opacity(0.025)))
-                .overlay(RoundedRectangle(cornerRadius: 21).stroke(LinearGradient(colors: [cyan.opacity(0.3), violet.opacity(0.22)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1))
+            .scrollContentBackground(.hidden)
+            .background(Color(red: 0.035, green: 0.045, blue: 0.09))
+            .navigationTitle(
+                isVietnamese ? "Cài đặt" : "Settings"
+            )
         }
     }
 
-    private func sendNotification() {
-        let cleanTitle = titleText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanBody = bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanTitle.isEmpty, !cleanBody.isEmpty else {
-            statusIsError = true
-            statusMessage = "Vui lòng nhập cả tiêu đề và nội dung."
-            return
-        }
+    private func infoRow(
+        title: String,
+        value: String,
+        symbol: String
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .foregroundStyle(.cyan)
+                .frame(width: 24)
 
-        isScheduling = true
-        statusMessage = ""
-        let delay = delays[selectedDelay].seconds
+            Text(title)
 
-        Task { @MainActor in
-            do {
-                try await LocalNotificationManager.shared.schedule(
-                    title: cleanTitle,
-                    body: cleanBody,
-                    delaySeconds: delay
-                )
-                statusIsError = false
-                statusMessage = delay == 0
-                    ? "Đã gửi yêu cầu hiển thị thông báo."
-                    : "Đã lên lịch thông báo \(delays[selectedDelay].title.lowercased())."
-            } catch {
-                statusIsError = true
-                statusMessage = error.localizedDescription
-            }
-            isScheduling = false
+            Spacer(minLength: 12)
+
+            Text(value)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
         }
     }
 }
