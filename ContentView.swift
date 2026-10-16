@@ -723,16 +723,18 @@ enum ZipReader {
 
             let dataStart = nameEnd + extraLen
             var fileData: Data
+            var nextOffset: Int
 
             if flags & 0x08 != 0 {
-                let descriptorStart = dataStart + compSize
-                var descOffset = descriptorStart
+                var descOffset = dataStart + compSize
                 if descOffset + 16 <= count {
                     let maybeSig = readUInt32(bytes, descOffset)
                     if maybeSig == 0x08074b50 { descOffset += 4 }
                     let realCompSize = Int(readUInt32(bytes, descOffset + 4))
-                    fileData = Data(bytes[dataStart..<min(dataStart + realCompSize, count)])
-                    offset = descOffset + 12
+                    let dataEnd = dataStart + realCompSize
+                    guard dataEnd <= count else { break }
+                    fileData = Data(bytes[dataStart..<dataEnd])
+                    nextOffset = descOffset + 12
                 } else {
                     break
                 }
@@ -740,11 +742,11 @@ enum ZipReader {
                 let dataEnd = dataStart + compSize
                 guard dataEnd <= count else { break }
                 fileData = Data(bytes[dataStart..<dataEnd])
-                offset = dataEnd
+                nextOffset = dataEnd
             }
 
             if method == 8 {
-                fileData = try inflate(fileData, expectedSize: uncompSize)
+                fileData = try Inflate.rawDeflate(fileData, expectedSize: uncompSize)
             }
 
             let target = destination.appendingPathComponent(name)
@@ -755,6 +757,7 @@ enum ZipReader {
                 try fileData.write(to: target)
                 extracted.append(target)
             }
+            offset = nextOffset
         }
         return extracted
     }
@@ -768,52 +771,192 @@ enum ZipReader {
             | (UInt32(bytes[offset + 2]) << 16)
             | (UInt32(bytes[offset + 3]) << 24)
     }
+}
 
-    private static func inflate(_ data: Data, expectedSize: Int) throws -> Data {
-        if data.isEmpty { return Data() }
-        var stream = z_stream()
-        var status = inflateInit2_(&stream, -15, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
-        guard status == Z_OK else {
-            throw NSError(domain: "ZipReader", code: 1, userInfo: [NSLocalizedDescriptionKey: "inflateInit2 failed \(status)"])
-        }
-        defer { inflateEnd(&stream) }
-
-        var output = Data(count: max(expectedSize, 4096))
-        var inputBuffer = [UInt8](data)
-
-        return try inputBuffer.withUnsafeMutableBufferPointer { inPtr -> Data in
-            stream.next_in = inPtr.baseAddress
-            stream.avail_in = uInt(inputBuffer.count)
-
-            return try output.withUnsafeMutableBytes { outRaw -> Data in
-                let outPtr = outRaw.bindMemory(to: UInt8.self).baseAddress!
-                var totalOut = 0
-                var outCap = outRaw.count
-
-                while true {
-                    stream.next_out = outPtr + totalOut
-                    stream.avail_out = uInt(outCap - totalOut)
-                    status = inflate(&stream, Z_NO_FLUSH)
-                    totalOut = outCap - Int(stream.avail_out)
-
-                    if status == Z_STREAM_END { break }
-                    if status != Z_OK {
-                        throw NSError(domain: "ZipReader", code: 2, userInfo: [NSLocalizedDescriptionKey: "inflate error \(status)"])
-                    }
-                    if totalOut >= outCap {
-                        outCap *= 2
-                        var newOut = Data(count: outCap)
-                        newOut.withUnsafeMutableBytes { newRaw in
-                            outRaw.copyBytes(to: newRaw)
-                        }
-                        output = newOut
-                    } else {
-                        break
-                    }
-                }
-                return output.prefix(totalOut)
+enum Inflate {
+    enum InflateError: LocalizedError {
+        case unexpectedEnd, invalidCode, invalidDistance, invalidBlock
+        var errorDescription: String? {
+            switch self {
+            case .unexpectedEnd: return "Dữ liệu deflate kết thúc bất ngờ."
+            case .invalidCode: return "Mã Huffman không hợp lệ."
+            case .invalidDistance: return "Khoảng cách LZ77 không hợp lệ."
+            case .invalidBlock: return "Block type không hỗ trợ."
             }
         }
+    }
+
+    struct Huffman {
+        var counts: [Int]
+        var symbols: [Int]
+
+        func decode(_ readBit: () throws -> Int) throws -> Int {
+            var code = 0
+            var first = 0
+            var index = 0
+            for len in 1...15 {
+                code |= try readBit()
+                let count = counts[len]
+                if code - first < count {
+                    return symbols[index + (code - first)]
+                }
+                index += count
+                first = (first + count) << 1
+                code <<= 1
+            }
+            throw InflateError.invalidCode
+        }
+    }
+
+    static func rawDeflate(_ input: Data, expectedSize: Int) throws -> Data {
+        var output = Data(count: max(expectedSize, 65536))
+        let inputBytes = [UInt8](input)
+        var outCount = 0
+        var bitPos = 0
+
+        func ensureCapacity(_ needed: Int) {
+            if outCount + needed > output.count {
+                let newCap = max(output.count * 2, outCount + needed + 65536)
+                var newData = Data(count: newCap)
+                newData.withUnsafeMutableBytes { dst in
+                    output.withUnsafeBytes { src in
+                        dst.copyBytes(from: src)
+                    }
+                }
+                output = newData
+            }
+        }
+
+        func readBit() throws -> Int {
+            if bitPos >= inputBytes.count * 8 { throw InflateError.unexpectedEnd }
+            let byte = inputBytes[bitPos >> 3]
+            let bit = (Int(byte) >> (bitPos & 7)) & 1
+            bitPos += 1
+            return bit
+        }
+
+        func readBits(_ n: Int) throws -> Int {
+            var value = 0
+            for i in 0..<n {
+                value |= try readBit() << i
+            }
+            return value
+        }
+
+        func alignToByte() {
+            if bitPos % 8 != 0 { bitPos += 8 - (bitPos % 8) }
+        }
+
+        func buildHuffman(lengths: [Int]) -> Huffman {
+            var counts = [Int](repeating: 0, count: 16)
+            for len in lengths where len > 0 { counts[len] += 1 }
+            var offsets = [Int](repeating: 0, count: 16)
+            for i in 1..<16 { offsets[i] = offsets[i - 1] + counts[i - 1] }
+            var symbols = [Int](repeating: 0, count: max(lengths.count, 1))
+            for (sym, len) in lengths.enumerated() where len > 0 {
+                symbols[offsets[len]] = sym
+                offsets[len] += 1
+            }
+            return Huffman(counts: counts, symbols: symbols)
+        }
+
+        let lengthBase = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+        let lengthExtra = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+        let distBase = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
+        let distExtra = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+
+        while true {
+            let bfinal = try readBit()
+            let btype = try readBits(2)
+
+            if btype == 0 {
+                alignToByte()
+                _ = try readBits(16)
+                let len = try readBits(16)
+                _ = try readBits(16)
+                ensureCapacity(len)
+                for _ in 0..<len {
+                    let b = try readBits(8)
+                    output[outCount] = UInt8(b)
+                    outCount += 1
+                }
+            } else if btype == 1 || btype == 2 {
+                let litHuff: Huffman
+                let distHuff: Huffman
+
+                if btype == 1 {
+                    var litLens = [Int](repeating: 0, count: 288)
+                    for i in 0..<144 { litLens[i] = 8 }
+                    for i in 144..<256 { litLens[i] = 9 }
+                    for i in 256..<280 { litLens[i] = 7 }
+                    for i in 280..<288 { litLens[i] = 8 }
+                    litHuff = buildHuffman(lengths: litLens)
+                    distHuff = buildHuffman(lengths: [Int](repeating: 5, count: 30))
+                } else {
+                    let hlit = try readBits(5) + 257
+                    let hdist = try readBits(5) + 1
+                    let hclen = try readBits(4) + 4
+                    let order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+                    var clLens = [Int](repeating: 0, count: 19)
+                    for i in 0..<hclen {
+                        clLens[order[i]] = try readBits(3)
+                    }
+                    let clHuff = buildHuffman(lengths: clLens)
+                    var allLens = [Int]()
+                    while allLens.count < hlit + hdist {
+                        let sym = try clHuff.decode(readBit)
+                        if sym < 16 {
+                            allLens.append(sym)
+                        } else if sym == 16 {
+                            let rep = try readBits(2) + 3
+                            let prev = allLens.last ?? 0
+                            for _ in 0..<rep { allLens.append(prev) }
+                        } else if sym == 17 {
+                            let rep = try readBits(3) + 3
+                            for _ in 0..<rep { allLens.append(0) }
+                        } else {
+                            let rep = try readBits(7) + 11
+                            for _ in 0..<rep { allLens.append(0) }
+                        }
+                    }
+                    let litLens = Array(allLens.prefix(hlit))
+                    let distLens = Array(allLens.suffix(hdist))
+                    litHuff = buildHuffman(lengths: litLens)
+                    distHuff = buildHuffman(lengths: distLens)
+                }
+
+                while true {
+                    let sym = try litHuff.decode(readBit)
+                    if sym < 256 {
+                        ensureCapacity(1)
+                        output[outCount] = UInt8(sym)
+                        outCount += 1
+                    } else if sym == 256 {
+                        break
+                    } else {
+                        let li = sym - 257
+                        guard li < lengthBase.count else { throw InflateError.invalidCode }
+                        let length = lengthBase[li] + (try readBits(lengthExtra[li]))
+                        let dsym = try distHuff.decode(readBit)
+                        guard dsym < distBase.count else { throw InflateError.invalidCode }
+                        let dist = distBase[dsym] + (try readBits(distExtra[dsym]))
+                        guard dist <= outCount else { throw InflateError.invalidDistance }
+                        ensureCapacity(length)
+                        let start = outCount - dist
+                        for i in 0..<length {
+                            output[outCount] = output[start + i]
+                            outCount += 1
+                        }
+                    }
+                }
+            } else {
+                throw InflateError.invalidBlock
+            }
+
+            if bfinal == 1 { break }
+        }
+
+        return output.prefix(outCount)
     }
 }
 
@@ -911,8 +1054,9 @@ final class IPACrackVM: ObservableObject {
 
             let assetsURL = appDir.appendingPathComponent("Assets.car")
             if fm.fileExists(atPath: assetsURL.path) {
-                let size = (try? fm.attributesOfItem(atPath: assetsURL.path)[.size] as? Int) ?? 0
-                append("Assets.car: \(ByteCountFormatter.string(fromByteCount: Int64(size ?? 0), countStyle: .file))")
+                let attrs = try? fm.attributesOfItem(atPath: assetsURL.path)
+                let size = (attrs?[.size] as? Int) ?? 0
+                append("Assets.car: \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))")
             }
 
             progress = 0.9
@@ -933,7 +1077,7 @@ final class IPACrackVM: ObservableObject {
     private func append(_ s: String) { log.append(s) }
 
     private func detectArchitectures(_ data: Data) -> [String]? {
-        guard data.count >= 8 else { return nil }
+        guard data.count >= 12 else { return nil }
         let magic = data.withUnsafeBytes { $0.load(as: UInt32.self) }
         let beMagic = magic.byteSwapped
         let fatMagics: [UInt32] = [0xCAFEBABE, 0xCAFEBABF, 0xBFBAFECA]
@@ -942,8 +1086,6 @@ final class IPACrackVM: ObservableObject {
         }
         var archs: [String] = []
         let cpuType = data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self) }
-        let cpuSubtype = data.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt32.self) }
-        _ = cpuSubtype
         switch cpuType {
         case 0x0100000C: archs.append("arm64")
         case 0x0000000C: archs.append("armv7")
@@ -1028,12 +1170,6 @@ struct IPACrackerView: View {
                             }
                             .padding(14).background(.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 14))
                         }
-
-                        Button {
-                            if vm.fileName.isEmpty { showImporter = true }
-                        } label: {
-                            EmptyView()
-                        }.hidden()
 
                         if vm.busy || vm.progress > 0 {
                             ProgressView(value: vm.progress).tint(orange)
