@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import Foundation
+import UIKit
 
 struct TelegramChat: Identifiable, Hashable, Codable {
     let id: Int64
@@ -56,7 +57,7 @@ final class TelegramVM: ObservableObject {
         message = saved.message
         delay = saved.delay
         sentCount = saved.sentCount
-        running = false // Tasks cannot survive app termination; never pretend the loop is still active.
+        running = false
         status = saved.wasRunning
             ? "Đã khôi phục thiết lập. Phiên trước đã chạy; hãy bấm BẮT ĐẦU ĐỊNH KỲ để tiếp tục."
             : saved.status
@@ -87,7 +88,7 @@ final class TelegramVM: ObservableObject {
                 }
             }
             chats = found.values.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-            status = chats.isEmpty ? "Chưa thấy nhóm nào trong update. Hãy thêm bot vào nhóm, gửi một tin nhắn trong nhóm rồi tải lại. Bot API không thể tự liệt kê mọi nhóm chỉ từ token." : "Đã tìm thấy \(chats.count) nhóm/kênh từ updates của bot."
+            status = chats.isEmpty ? "Chưa thấy nhóm nào trong update. Hãy thêm bot vào nhóm, gửi một tin nhắn trong nhóm rồi tải lại." : "Đã tìm thấy \(chats.count) nhóm/kênh từ updates của bot."
         } catch { status = "Không tải được nhóm: \(error.localizedDescription)" }
     }
 
@@ -101,13 +102,11 @@ final class TelegramVM: ObservableObject {
         } catch { status = "Gửi thất bại: \(error.localizedDescription)" }
     }
 
-    // Repeating mode is restricted to groups you manage or that have opted in.
-    // A 30-second minimum helps prevent accidental high-rate messaging.
     func startLoop() {
         guard !selectedIDs.isEmpty else { status = "Hãy chọn nhóm trước."; return }
         guard !message.isEmpty else { status = "Nhập nội dung trước."; return }
         guard !running else { return }
-        running = true; status = "Đang gửi định kỳ. Chỉ dùng trong nhóm bạn quản lý/đã đồng ý."
+        running = true; status = "Đang gửi định kỳ."
         let wait = max(30, delay)
         loopTask = Task {
             while !Task.isCancelled {
@@ -296,122 +295,405 @@ struct TelegramMessageView: View {
     }
 }
 
+@MainActor
+final class WebCrackVM: ObservableObject {
+    @Published var urlString = ""
+    @Published var status = "Nhập link web rồi bấm PHÂN TÍCH."
+    @Published var busy = false
+    @Published var progress: Double = 0
+    @Published var totalAssets: Int = 0
+    @Published var doneAssets: Int = 0
+    @Published var zipURL: URL?
+    @Published var previewHTML: String = ""
+    @Published var log: [String] = []
 
-// Main utility hub. Each utility opens as a separate screen; the navigation back button
-// returns to this dashboard without discarding the saved Telegram settings.
-struct ContentView: View {
-    @State private var glow = false
-    @State private var showAbout = false
-    @State private var showSecurity = false
+    private let session: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 30
+        cfg.httpAdditionalHeaders = [
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "vi,en;q=0.9"
+        ]
+        return URLSession(configuration: cfg)
+    }()
+
+    func crack() async {
+        guard let base = normalizedURL(urlString) else {
+            status = "Link không hợp lệ."; return
+        }
+        busy = true; progress = 0; doneAssets = 0; totalAssets = 0
+        log.removeAll(); zipURL = nil; previewHTML = ""
+        defer { busy = false }
+
+        do {
+            append("GET \(base.absoluteString)")
+            let (htmlData, response) = try await session.data(from: base)
+            guard let http = response as? HTTPURLResponse, (200...399).contains(http.statusCode) else {
+                throw NSError(domain: "WebCrack", code: 1, userInfo: [NSLocalizedDescriptionKey: "HTTP không hợp lệ"])
+            }
+            guard var html = String(data: htmlData, encoding: .utf8)
+                    ?? String(data: htmlData, encoding: .isoLatin1) else {
+                throw NSError(domain: "WebCrack", code: 2, userInfo: [NSLocalizedDescriptionKey: "Không decode được HTML"])
+            }
+            append("HTML gốc: \(htmlData.count) bytes")
+
+            var assets: [AssetRef] = []
+            assets += extractTag(html, tag: "script", attr: "src")
+            assets += extractTag(html, tag: "link",  attr: "href")
+            assets += extractTag(html, tag: "img",   attr: "src")
+            assets += extractTag(html, tag: "img",   attr: "data-src")
+            assets += extractTag(html, tag: "source",attr: "src")
+            assets += extractTag(html, tag: "source",attr: "srcset")
+            assets += extractTag(html, tag: "video", attr: "src")
+            assets += extractTag(html, tag: "audio", attr: "src")
+
+            var seen = Set<String>()
+            assets = assets.filter { a in
+                if seen.contains(a.remote.absoluteString) { return false }
+                seen.insert(a.remote.absoluteString); return true
+            }
+            totalAssets = assets.count
+            append("\(totalAssets) asset cần tải")
+
+            var localMap: [String: String] = [:]
+            let folder = uniqueFolder()
+            let fm = FileManager.default
+
+            let rootDir = fm.temporaryDirectory.appendingPathComponent(folder, isDirectory: true)
+            try? fm.removeItem(at: rootDir)
+            try fm.createDirectory(at: rootDir, withIntermediateDirectories: true)
+            let assetDir = rootDir.appendingPathComponent("assets", isDirectory: true)
+            try fm.createDirectory(at: assetDir, withIntermediateDirectories: true)
+
+            await withTaskGroup(of: (AssetRef, String?, Data?).self) { group in
+                for a in assets {
+                    group.addTask { [session] in
+                        do {
+                            let (data, _) = try await session.data(from: a.remote)
+                            return (a, nil, data)
+                        } catch {
+                            return (a, error.localizedDescription, nil)
+                        }
+                    }
+                }
+                for await (a, err, data) in group {
+                    doneAssets += 1
+                    progress = Double(doneAssets) / Double(max(1, totalAssets))
+                    if let err = err {
+                        append("LỖI \(a.remote.lastPathComponent) \(err)")
+                        continue
+                    }
+                    guard let data = data else { continue }
+                    let name = uniqueAssetName(for: a.remote, in: localMap)
+                    let localPath = "assets/\(name)"
+                    let dst = rootDir.appendingPathComponent(localPath)
+                    try? data.write(to: dst)
+                    localMap[a.remote.absoluteString] = localPath
+                    append("OK \(name) \(data.count)b")
+                }
+            }
+
+            html = rewrite(html, localMap: localMap)
+            let indexPath = rootDir.appendingPathComponent("index.html")
+            try html.write(to: indexPath, atomically: true, encoding: .utf8)
+
+            let zip = rootDir.appendingPathComponent("\(folder).zip")
+            try ZipWriter.zip(directory: rootDir, to: zip, rootName: folder)
+            zipURL = zip
+            previewHTML = html
+            status = "XONG. \(doneAssets)/\(totalAssets) asset. Bấm TẢI FILE VỀ."
+            append("Đóng gói \(zip.lastPathComponent)")
+        } catch {
+            status = "Lỗi: \(error.localizedDescription)"
+            append("LỖI \(error.localizedDescription)")
+        }
+    }
+
+    private func append(_ s: String) { log.append(s) }
+
+    private func normalizedURL(_ s: String) -> URL? {
+        var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return nil }
+        if !t.lowercased().hasPrefix("http://") && !t.lowercased().hasPrefix("https://") {
+            t = "https://" + t
+        }
+        return URL(string: t)
+    }
+
+    private func uniqueFolder() -> String {
+        let f = DateFormatter(); f.dateFormat = "yyyyMMdd_HHmmss"
+        return "webcrack_\(f.string(from: Date()))"
+    }
+
+    private func uniqueAssetName(for url: URL, in map: [String: String]) -> String {
+        let raw = url.lastPathComponent.isEmpty ? "file" : url.lastPathComponent
+        let base = raw.components(separatedBy: "?").first ?? raw
+        var candidate = base
+        var i = 1
+        let existing = Set(map.values.map { ($0 as NSString).lastPathComponent })
+        while existing.contains(candidate) {
+            let ext = (base as NSString).pathExtension
+            let stem = (base as NSString).deletingPathExtension
+            candidate = ext.isEmpty ? "\(stem)_\(i)" : "\(stem)_\(i).\(ext)"
+            i += 1
+        }
+        return candidate
+    }
+
+    private struct AssetRef { let remote: URL; let original: String }
+
+    private func resolve(_ raw: String, base: URL) -> URL? {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return nil }
+        if t.hasPrefix("data:") || t.hasPrefix("javascript:") || t.hasPrefix("#") { return nil }
+        return URL(string: t, relativeTo: base)?.absoluteURL
+    }
+
+    private func extractTag(_ html: String, tag: String, attr: String) -> [AssetRef] {
+        guard let base = normalizedURL(urlString) else { return [] }
+        var out: [AssetRef] = []
+        let pattern = "<\(tag)\\b[^>]*?\\b\(attr)\\s*=\\s*[\"']([^\"']+)[\"']"
+        if let rx = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+            let ns = html as NSString
+            rx.enumerateMatches(in: html, range: NSRange(location: 0, length: ns.length)) { m, _, _ in
+                guard let m = m, m.numberOfRanges >= 2 else { return }
+                let raw = ns.substring(with: m.range(at: 1))
+                if attr == "srcset" {
+                    for part in raw.split(separator: ",") {
+                        let u = part.trimmingCharacters(in: .whitespaces).split(separator: " ").first.map(String.init) ?? ""
+                        if let url = resolve(u, base: base) { out.append(AssetRef(remote: url, original: u)) }
+                    }
+                } else if let url = resolve(raw, base: base) {
+                    out.append(AssetRef(remote: url, original: raw))
+                }
+            }
+        }
+        return out
+    }
+
+    private func rewrite(_ html: String, localMap: [String: String]) -> String {
+        var result = html
+        for (remote, local) in localMap {
+            let variants = [
+                remote,
+                remote.replacingOccurrences(of: "https:", with: "http:"),
+                "//" + (URL(string: remote)?.host ?? "") + (URL(string: remote)?.path ?? ""),
+                URL(string: remote)?.path ?? ""
+            ]
+            for v in variants where !v.isEmpty {
+                result = result.replacingOccurrences(of: "\"\(v)\"", with: "\"\(local)\"")
+                result = result.replacingOccurrences(of: "'\(v)'", with: "'\(local)'")
+            }
+        }
+        return result
+    }
+}
+
+struct WebSourceCrackerView: View {
+    @StateObject private var vm = WebCrackVM()
+    @State private var showShare = false
     private let cyan = Color(red: 0.25, green: 0.9, blue: 1)
     private let violet = Color(red: 0.63, green: 0.4, blue: 1)
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                LinearGradient(colors: [Color(red: 0.018, green: 0.025, blue: 0.07), Color(red: 0.075, green: 0.025, blue: 0.14), Color(red: 0.012, green: 0.075, blue: 0.12)], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
-                Circle().fill(cyan.opacity(glow ? 0.19 : 0.07)).frame(width: 270).blur(radius: 90).offset(x: 140, y: -320).allowsHitTesting(false)
-                Circle().fill(violet.opacity(glow ? 0.17 : 0.06)).frame(width: 290).blur(radius: 95).offset(x: -140, y: 280).allowsHitTesting(false)
+        ZStack {
+            LinearGradient(colors: [
+                Color(red: 0.018, green: 0.025, blue: 0.07),
+                Color(red: 0.075, green: 0.025, blue: 0.14),
+                Color(red: 0.012, green: 0.075, blue: 0.12)
+            ], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
 
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 22) {
-                        dashboardHeader
-                        robotBanner
-                        HStack(alignment: .firstTextBaseline) {
-                            Text("TRUNG TÂM TIỆN ÍCH").font(.system(size: 12, weight: .black, design: .rounded)).tracking(1.6).foregroundStyle(.white)
-                            Spacer()
-                            Text("04 MODULES").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(cyan.opacity(0.8))
-                        }
-                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-                            NavigationLink { TelegramMessageView().toolbar(.visible, for: .navigationBar) } label: {
-                                UtilityTile(icon: "paperplane.fill", title: "Gửi tin nhắn", subtitle: "Telegram Bot", accent: cyan, tag: "SỬ DỤNG NGAY")
-                            }.buttonStyle(.plain)
-                            NavigationLink { ChatAIView().toolbar(.visible, for: .navigationBar) } label: {
-                                UtilityTile(icon: "sparkles", title: "Chat AI", subtitle: "OpenAI API", accent: violet, tag: "TRÒ CHUYỆN")
-                            }.buttonStyle(.plain)
-                            Button { withAnimation(.spring(response: 0.4, dampingFraction: 0.78)) { showAbout = true } } label: {
-                                UtilityTile(icon: "cpu.fill", title: "Trạng thái", subtitle: "Thông tin ứng dụng", accent: violet, tag: "THÔNG TIN")
-                            }.buttonStyle(.plain)
-                            Button { withAnimation(.spring(response: 0.4, dampingFraction: 0.78)) { showSecurity = true } } label: {
-                                UtilityTile(icon: "shield.lefthalf.filled", title: "Bảo mật", subtitle: "Token & dữ liệu", accent: Color(red: 0.4, green: 1, blue: 0.65), tag: "LƯU Ý")
-                            }.buttonStyle(.plain)
-                        }
-                        HStack(spacing: 10) {
-                            Image(systemName: "sparkles").foregroundStyle(cyan)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("THIẾT KẾ CHO TỐC ĐỘ").font(.system(size: 10, weight: .black, design: .rounded)).tracking(1).foregroundStyle(.white)
-                                Text("Chọn một tiện ích để mở màn hình riêng. Quay lại để chọn chức năng khác.").font(.system(size: 11)).foregroundStyle(.white.opacity(0.55)).fixedSize(horizontal: false, vertical: true)
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 18) {
+                    header
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("LINK WEB").font(.system(size: 10, weight: .black, design: .rounded)).tracking(1.2).foregroundStyle(cyan)
+                        TextField("https://example.com", text: $vm.urlString)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                            .font(.system(size: 13, design: .monospaced))
+                            .padding(12)
+                            .background(.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 12))
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(cyan.opacity(0.25), lineWidth: 1))
+
+                        Button { Task { await vm.crack() } } label: {
+                            HStack {
+                                if vm.busy { ProgressView().tint(.black) }
+                                else { Image(systemName: "bolt.fill") }
+                                Text(vm.busy ? "ĐANG CRACK..." : "CRACK FULL SRC").font(.system(size: 12, weight: .black))
                             }
-                        }.padding(14).background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 16)).overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.07), lineWidth: 1))
-                        Text("THANH DAT  •  UTILITY HUB").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(1.6).foregroundStyle(.white.opacity(0.28)).frame(maxWidth: .infinity).padding(.top, 2)
-                    }.padding(.horizontal, 18).padding(.top, 14).padding(.bottom, 28)
+                            .frame(maxWidth: .infinity).padding(14)
+                            .background(LinearGradient(colors: [cyan, violet], startPoint: .leading, endPoint: .trailing),
+                                        in: RoundedRectangle(cornerRadius: 14))
+                            .foregroundStyle(.black)
+                        }.disabled(vm.busy || vm.urlString.isEmpty)
+
+                        if vm.busy || vm.progress > 0 {
+                            ProgressView(value: vm.progress).tint(cyan)
+                            Text("\(vm.doneAssets)/\(vm.totalAssets) asset").font(.system(size: 10, design: .monospaced)).foregroundStyle(.white.opacity(0.6))
+                        }
+                    }
+                    .padding(16)
+                    .background(.ultraThinMaterial.opacity(0.65), in: RoundedRectangle(cornerRadius: 20))
+                    .overlay(RoundedRectangle(cornerRadius: 20).stroke(cyan.opacity(0.18), lineWidth: 1))
+
+                    if let zip = vm.zipURL {
+                        Button { showShare = true } label: {
+                            HStack {
+                                Image(systemName: "square.and.arrow.down.fill")
+                                Text("TẢI FILE VỀ (\(zip.lastPathComponent))").font(.system(size: 12, weight: .black))
+                            }
+                            .frame(maxWidth: .infinity).padding(14)
+                            .background(Color.green.opacity(0.18), in: RoundedRectangle(cornerRadius: 14))
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.green.opacity(0.5), lineWidth: 1))
+                            .foregroundStyle(.green)
+                        }
+                        .sheet(isPresented: $showShare) {
+                            ShareSheet(items: [zip])
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("TRẠNG THÁI").font(.system(size: 10, weight: .black)).foregroundStyle(cyan)
+                        Text(vm.status).font(.system(size: 12)).foregroundStyle(.white.opacity(0.75))
+                    }
+                    .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
+
+                    if !vm.log.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("LOG").font(.system(size: 10, weight: .black)).foregroundStyle(violet)
+                            ForEach(Array(vm.log.enumerated()), id: \.offset) { _, line in
+                                Text(line).font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.6))
+                            }
+                        }
+                        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 14))
+                    }
                 }
-            }
-            .toolbar(.hidden, for: .navigationBar)
-            .sheet(isPresented: $showAbout) { InfoUtilityView(kind: .about).presentationDetents([.medium, .large]).presentationDragIndicator(.visible) }
-            .sheet(isPresented: $showSecurity) { InfoUtilityView(kind: .security).presentationDetents([.medium, .large]).presentationDragIndicator(.visible) }
-            .onAppear {
-                withAnimation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true)) { glow = true }
+                .padding(18)
             }
         }
         .preferredColorScheme(.dark)
+        .navigationTitle("Web Cracker")
     }
 
-    private var dashboardHeader: some View {
+    private var header: some View {
         HStack(spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 16).fill(LinearGradient(colors: [cyan.opacity(0.24), violet.opacity(0.22)], startPoint: .topLeading, endPoint: .bottomTrailing)).frame(width: 54, height: 54)
-                Image(systemName: "square.grid.2x2.fill").font(.system(size: 23, weight: .bold)).foregroundStyle(cyan).shadow(color: cyan.opacity(0.5), radius: 10)
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                Text("THANH DAT").font(.system(size: 22, weight: .black, design: .rounded)).tracking(1.7).foregroundStyle(.white)
-                Text("SMART UTILITY CENTER").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(1.8).foregroundStyle(cyan)
-            }
-            Spacer()
-            Circle().fill(cyan).frame(width: 7, height: 7).shadow(color: cyan, radius: 7).opacity(glow ? 1 : 0.35)
-        }.padding(.top, 36)
-    }
-
-    private var robotBanner: some View {
-        HStack(spacing: 14) {
-            AnimatedHubRobot(glow: glow).frame(width: 92, height: 94)
-            VStack(alignment: .leading, spacing: 7) {
-                Text("HELLO, OPERATOR").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(1.5).foregroundStyle(cyan)
-                Text("Mọi công cụ\ntrong một nơi.").font(.system(size: 21, weight: .black, design: .rounded)).foregroundStyle(.white).fixedSize(horizontal: false, vertical: true)
-                Text("CHỌN MODULE ĐỂ BẮT ĐẦU").font(.system(size: 8, weight: .bold, design: .monospaced)).tracking(0.8).foregroundStyle(.white.opacity(0.48))
-            }
-            Spacer(minLength: 0)
-        }.padding(15).background(RoundedRectangle(cornerRadius: 23).fill(.ultraThinMaterial.opacity(0.7))).overlay(RoundedRectangle(cornerRadius: 23).stroke(LinearGradient(colors: [cyan.opacity(glow ? 0.5 : 0.2), violet.opacity(0.25), .white.opacity(0.05)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)).shadow(color: cyan.opacity(glow ? 0.09 : 0.02), radius: 22)
-    }
-}
-
-private struct UtilityTile: View {
-    let icon: String
-    let title: String
-    let subtitle: String
-    let accent: Color
-    let tag: String
-    @State private var hovering = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 13).fill(accent.opacity(0.14)).frame(width: 43, height: 43)
-                    Image(systemName: icon).font(.system(size: 18, weight: .bold)).foregroundStyle(accent).shadow(color: accent.opacity(0.35), radius: 8)
-                }
-                Spacer()
-                Image(systemName: "arrow.up.right").font(.system(size: 11, weight: .bold)).foregroundStyle(accent.opacity(0.8)).padding(8).background(.white.opacity(0.04), in: Circle())
+                RoundedRectangle(cornerRadius: 14).fill(cyan.opacity(0.14)).frame(width: 48, height: 48)
+                Image(systemName: "network").font(.system(size: 21, weight: .bold)).foregroundStyle(cyan)
             }
             VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.system(size: 15, weight: .black, design: .rounded)).foregroundStyle(.white)
-                Text(subtitle).font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.5)).lineLimit(2)
+                Text("WEB SOURCE CRACKER").font(.system(size: 15, weight: .black, design: .rounded)).tracking(1).foregroundStyle(.white)
+                Text("FETCH REWRITE ZIP EXPORT").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(cyan)
             }
-            Text(tag).font(.system(size: 8, weight: .black, design: .monospaced)).tracking(0.6).foregroundStyle(accent).padding(.horizontal, 8).padding(.vertical, 6).background(accent.opacity(0.09), in: Capsule())
-        }.frame(maxWidth: .infinity, minHeight: 150, alignment: .leading).padding(14).background(RoundedRectangle(cornerRadius: 19).fill(.ultraThinMaterial.opacity(0.72))).overlay(RoundedRectangle(cornerRadius: 19).stroke(accent.opacity(hovering ? 0.58 : 0.19), lineWidth: 1)).scaleEffect(hovering ? 1.015 : 1).shadow(color: accent.opacity(hovering ? 0.12 : 0.025), radius: hovering ? 16 : 6).animation(.spring(response: 0.32, dampingFraction: 0.72), value: hovering).onAppear { withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) { hovering = true } }
+            Spacer()
+        }
     }
 }
 
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+}
+
+enum ZipWriter {
+    static func zip(directory: URL, to output: URL, rootName: String) throws {
+        let fm = FileManager.default
+        var entries: [(path: String, data: Data)] = []
+
+        let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: [.isDirectoryKey])
+        while let fileURL = enumerator?.nextObject() as? URL {
+            let values = try fileURL.resourceValues(forKeys: [.isDirectoryKey])
+            if values.isDirectory == true { continue }
+            let rel = fileURL.path.replacingOccurrences(of: directory.path + "/", with: "")
+            let data = try Data(contentsOf: fileURL)
+            entries.append(("\(rootName)/\(rel)", data))
+        }
+
+        var out = Data()
+        var centralDirectory = Data()
+
+        for (path, data) in entries {
+            let nameData = path.data(using: .utf8)!
+            let crc = crc32(data)
+            let offset = out.count
+
+            out.append(le32(0x04034b50))
+            out.append(le16(20))
+            out.append(le16(0))
+            out.append(le16(0))
+            out.append(le16(0))
+            out.append(le16(0))
+            out.append(le32(crc))
+            out.append(le32(UInt32(data.count)))
+            out.append(le32(UInt32(data.count)))
+            out.append(le16(UInt16(nameData.count)))
+            out.append(le16(0))
+            out.append(nameData)
+            out.append(data)
+
+            centralDirectory.append(le32(0x02014b50))
+            centralDirectory.append(le16(20))
+            centralDirectory.append(le16(20))
+            centralDirectory.append(le16(0))
+            centralDirectory.append(le16(0))
+            centralDirectory.append(le16(0))
+            centralDirectory.append(le16(0))
+            centralDirectory.append(le32(crc))
+            centralDirectory.append(le32(UInt32(data.count)))
+            centralDirectory.append(le32(UInt32(data.count)))
+            centralDirectory.append(le16(UInt16(nameData.count)))
+            centralDirectory.append(le16(0))
+            centralDirectory.append(le16(0))
+            centralDirectory.append(le16(0))
+            centralDirectory.append(le16(0))
+            centralDirectory.append(le32(0))
+            centralDirectory.append(le32(UInt32(offset)))
+            centralDirectory.append(nameData)
+        }
+
+        let cdOffset = out.count
+        out.append(centralDirectory)
+
+        out.append(le32(0x06054b50))
+        out.append(le16(0))
+        out.append(le16(0))
+        out.append(le16(UInt16(entries.count)))
+        out.append(le16(UInt16(entries.count)))
+        out.append(le32(UInt32(centralDirectory.count)))
+        out.append(le32(UInt32(centralDirectory.count)))
+        out.append(le32(UInt32(cdOffset)))
+        out.append(le16(0))
+
+        try out.write(to: output)
+    }
+
+    private static func le16(_ v: UInt16) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+    private static func le32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+
+    private static let table: [UInt32] = {
+        (0..<256).map { i -> UInt32 in
+            var c = UInt32(i)
+            for _ in 0..<8 { c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1 }
+            return c
+        }
+    }()
+
+    static func crc32(_ data: Data) -> UInt32 {
+        var c: UInt32 = 0xFFFFFFFF
+        for b in data { c = table[Int((c ^ UInt32(b)) & 0xFF)] ^ (c >> 8) }
+        return c ^ 0xFFFFFFFF
+    }
+}
 
 private struct AIChatMessage: Identifiable {
     let id = UUID()
@@ -634,5 +916,121 @@ private struct InfoUtilityView: View {
             }
             Spacer(minLength: 0)
         }.padding(13).background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 14)).overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.06), lineWidth: 1))
+    }
+}
+
+struct ContentView: View {
+    @State private var glow = false
+    @State private var showAbout = false
+    @State private var showSecurity = false
+    private let cyan = Color(red: 0.25, green: 0.9, blue: 1)
+    private let violet = Color(red: 0.63, green: 0.4, blue: 1)
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                LinearGradient(colors: [Color(red: 0.018, green: 0.025, blue: 0.07), Color(red: 0.075, green: 0.025, blue: 0.14), Color(red: 0.012, green: 0.075, blue: 0.12)], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
+                Circle().fill(cyan.opacity(glow ? 0.19 : 0.07)).frame(width: 270).blur(radius: 90).offset(x: 140, y: -320).allowsHitTesting(false)
+                Circle().fill(violet.opacity(glow ? 0.17 : 0.06)).frame(width: 290).blur(radius: 95).offset(x: -140, y: 280).allowsHitTesting(false)
+
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 22) {
+                        dashboardHeader
+                        robotBanner
+                        HStack(alignment: .firstTextBaseline) {
+                            Text("TRUNG TÂM TIỆN ÍCH").font(.system(size: 12, weight: .black, design: .rounded)).tracking(1.6).foregroundStyle(.white)
+                            Spacer()
+                            Text("05 MODULES").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(cyan.opacity(0.8))
+                        }
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                            NavigationLink { TelegramMessageView().toolbar(.visible, for: .navigationBar) } label: {
+                                UtilityTile(icon: "paperplane.fill", title: "Gửi tin nhắn", subtitle: "Telegram Bot", accent: cyan, tag: "SỬ DỤNG NGAY")
+                            }.buttonStyle(.plain)
+                            NavigationLink { ChatAIView().toolbar(.visible, for: .navigationBar) } label: {
+                                UtilityTile(icon: "sparkles", title: "Chat AI", subtitle: "OpenAI API", accent: violet, tag: "TRÒ CHUYỆN")
+                            }.buttonStyle(.plain)
+                            NavigationLink { WebSourceCrackerView().toolbar(.visible, for: .navigationBar) } label: {
+                                UtilityTile(icon: "network", title: "Crack Web Src", subtitle: "Tải full source", accent: Color(red: 1, green: 0.6, blue: 0.25), tag: "CRACK")
+                            }.buttonStyle(.plain)
+                            Button { withAnimation(.spring(response: 0.4, dampingFraction: 0.78)) { showAbout = true } } label: {
+                                UtilityTile(icon: "cpu.fill", title: "Trạng thái", subtitle: "Thông tin ứng dụng", accent: violet, tag: "THÔNG TIN")
+                            }.buttonStyle(.plain)
+                            Button { withAnimation(.spring(response: 0.4, dampingFraction: 0.78)) { showSecurity = true } } label: {
+                                UtilityTile(icon: "shield.lefthalf.filled", title: "Bảo mật", subtitle: "Token & dữ liệu", accent: Color(red: 0.4, green: 1, blue: 0.65), tag: "LƯU Ý")
+                            }.buttonStyle(.plain)
+                        }
+                        HStack(spacing: 10) {
+                            Image(systemName: "sparkles").foregroundStyle(cyan)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("THIẾT KẾ CHO TỐC ĐỘ").font(.system(size: 10, weight: .black, design: .rounded)).tracking(1).foregroundStyle(.white)
+                                Text("Chọn một tiện ích để mở màn hình riêng. Quay lại để chọn chức năng khác.").font(.system(size: 11)).foregroundStyle(.white.opacity(0.55)).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }.padding(14).background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 16)).overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.07), lineWidth: 1))
+                        Text("THANH DAT  •  UTILITY HUB").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(1.6).foregroundStyle(.white.opacity(0.28)).frame(maxWidth: .infinity).padding(.top, 2)
+                    }.padding(.horizontal, 18).padding(.top, 14).padding(.bottom, 28)
+                }
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $showAbout) { InfoUtilityView(kind: .about).presentationDetents([.medium, .large]).presentationDragIndicator(.visible) }
+            .sheet(isPresented: $showSecurity) { InfoUtilityView(kind: .security).presentationDetents([.medium, .large]).presentationDragIndicator(.visible) }
+            .onAppear {
+                withAnimation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true)) { glow = true }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private var dashboardHeader: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 16).fill(LinearGradient(colors: [cyan.opacity(0.24), violet.opacity(0.22)], startPoint: .topLeading, endPoint: .bottomTrailing)).frame(width: 54, height: 54)
+                Image(systemName: "square.grid.2x2.fill").font(.system(size: 23, weight: .bold)).foregroundStyle(cyan).shadow(color: cyan.opacity(0.5), radius: 10)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                Text("THANH DAT").font(.system(size: 22, weight: .black, design: .rounded)).tracking(1.7).foregroundStyle(.white)
+                Text("SMART UTILITY CENTER").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(1.8).foregroundStyle(cyan)
+            }
+            Spacer()
+            Circle().fill(cyan).frame(width: 7, height: 7).shadow(color: cyan, radius: 7).opacity(glow ? 1 : 0.35)
+        }.padding(.top, 36)
+    }
+
+    private var robotBanner: some View {
+        HStack(spacing: 14) {
+            AnimatedHubRobot(glow: glow).frame(width: 92, height: 94)
+            VStack(alignment: .leading, spacing: 7) {
+                Text("HELLO, OPERATOR").font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(1.5).foregroundStyle(cyan)
+                Text("Mọi công cụ\ntrong một nơi.").font(.system(size: 21, weight: .black, design: .rounded)).foregroundStyle(.white).fixedSize(horizontal: false, vertical: true)
+                Text("CHỌN MODULE ĐỂ BẮT ĐẦU").font(.system(size: 8, weight: .bold, design: .monospaced)).tracking(0.8).foregroundStyle(.white.opacity(0.48))
+            }
+            Spacer(minLength: 0)
+        }.padding(15).background(RoundedRectangle(cornerRadius: 23).fill(.ultraThinMaterial.opacity(0.7))).overlay(RoundedRectangle(cornerRadius: 23).stroke(LinearGradient(colors: [cyan.opacity(glow ? 0.5 : 0.2), violet.opacity(0.25), .white.opacity(0.05)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)).shadow(color: cyan.opacity(glow ? 0.09 : 0.02), radius: 22)
+    }
+}
+
+private struct UtilityTile: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let accent: Color
+    let tag: String
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 13).fill(accent.opacity(0.14)).frame(width: 43, height: 43)
+                    Image(systemName: icon).font(.system(size: 18, weight: .bold)).foregroundStyle(accent).shadow(color: accent.opacity(0.35), radius: 8)
+                }
+                Spacer()
+                Image(systemName: "arrow.up.right").font(.system(size: 11, weight: .bold)).foregroundStyle(accent.opacity(0.8)).padding(8).background(.white.opacity(0.04), in: Circle())
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.system(size: 15, weight: .black, design: .rounded)).foregroundStyle(.white)
+                Text(subtitle).font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.5)).lineLimit(2)
+            }
+            Text(tag).font(.system(size: 8, weight: .black, design: .monospaced)).tracking(0.6).foregroundStyle(accent).padding(.horizontal, 8).padding(.vertical, 6).background(accent.opacity(0.09), in: Capsule())
+        }.frame(maxWidth: .infinity, minHeight: 150, alignment: .leading).padding(14).background(RoundedRectangle(cornerRadius: 19).fill(.ultraThinMaterial.opacity(0.72))).overlay(RoundedRectangle(cornerRadius: 19).stroke(accent.opacity(hovering ? 0.58 : 0.19), lineWidth: 1)).scaleEffect(hovering ? 1.015 : 1).shadow(color: accent.opacity(hovering ? 0.12 : 0.025), radius: hovering ? 16 : 6).animation(.spring(response: 0.32, dampingFraction: 0.72), value: hovering).onAppear { withAnimation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true)) { hovering = true } }
     }
 }
