@@ -3,6 +3,10 @@ import UniformTypeIdentifiers
 import Foundation
 import UIKit
 
+extension UTType {
+    static let ipa: UTType = UTType(exportedAs: "com.thanhdat.ipa", conformingTo: .archive)
+}
+
 struct TelegramChat: Identifiable, Hashable, Codable {
     let id: Int64
     let title: String?
@@ -1222,7 +1226,7 @@ struct IPACrackerView: View {
         .navigationTitle("IPA Cracker")
         .fileImporter(
             isPresented: $showImporter,
-            allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .data, .archive, .data],
+            allowedContentTypes: [.ipa, .data, .item],
             allowsMultipleSelection: false
         ) { result in
             do {
