@@ -694,157 +694,421 @@ enum ZipWriter {
     }
 }
 
-private struct AIChatMessage: Identifiable {
-    let id = UUID()
-    let text: String
-    let isUser: Bool
-}
+enum ZipReader {
+    static func unzip(_ zipURL: URL, to destination: URL) throws -> [URL] {
+        let data = try Data(contentsOf: zipURL)
+        let fm = FileManager.default
+        try? fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        var extracted: [URL] = []
 
-private struct OpenAIResponsesResult: Decodable {
-    struct OutputItem: Decodable {
-        struct ContentItem: Decodable {
-            let type: String?
-            let text: String?
+        var offset = 0
+        let bytes = [UInt8](data)
+        let count = bytes.count
+
+        while offset + 30 <= count {
+            let sig = readUInt32(bytes, offset)
+            if sig != 0x04034b50 { break }
+            let flags = readUInt16(bytes, offset + 6)
+            let method = readUInt16(bytes, offset + 8)
+            let compSize = Int(readUInt32(bytes, offset + 18))
+            let uncompSize = Int(readUInt32(bytes, offset + 22))
+            let nameLen = Int(readUInt16(bytes, offset + 26))
+            let extraLen = Int(readUInt16(bytes, offset + 28))
+
+            let nameStart = offset + 30
+            let nameEnd = nameStart + nameLen
+            guard nameEnd <= count else { break }
+            let nameData = Data(bytes[nameStart..<nameEnd])
+            let name = String(data: nameData, encoding: .utf8) ?? ""
+
+            let dataStart = nameEnd + extraLen
+            var fileData: Data
+
+            if flags & 0x08 != 0 {
+                let descriptorStart = dataStart + compSize
+                var descOffset = descriptorStart
+                if descOffset + 16 <= count {
+                    let maybeSig = readUInt32(bytes, descOffset)
+                    if maybeSig == 0x08074b50 { descOffset += 4 }
+                    let realCompSize = Int(readUInt32(bytes, descOffset + 4))
+                    fileData = Data(bytes[dataStart..<min(dataStart + realCompSize, count)])
+                    offset = descOffset + 12
+                } else {
+                    break
+                }
+            } else {
+                let dataEnd = dataStart + compSize
+                guard dataEnd <= count else { break }
+                fileData = Data(bytes[dataStart..<dataEnd])
+                offset = dataEnd
+            }
+
+            if method == 8 {
+                fileData = try inflate(fileData, expectedSize: uncompSize)
+            }
+
+            let target = destination.appendingPathComponent(name)
+            if name.hasSuffix("/") {
+                try? fm.createDirectory(at: target, withIntermediateDirectories: true)
+            } else {
+                try? fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fileData.write(to: target)
+                extracted.append(target)
+            }
         }
-        let content: [ContentItem]?
+        return extracted
     }
-    let output: [OutputItem]?
-    let error: APIError?
-    struct APIError: Decodable { let message: String? }
+
+    private static func readUInt16(_ bytes: [UInt8], _ offset: Int) -> UInt16 {
+        return UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+    }
+    private static func readUInt32(_ bytes: [UInt8], _ offset: Int) -> UInt32 {
+        return UInt32(bytes[offset])
+            | (UInt32(bytes[offset + 1]) << 8)
+            | (UInt32(bytes[offset + 2]) << 16)
+            | (UInt32(bytes[offset + 3]) << 24)
+    }
+
+    private static func inflate(_ data: Data, expectedSize: Int) throws -> Data {
+        if data.isEmpty { return Data() }
+        var stream = z_stream()
+        var status = inflateInit2_(&stream, -15, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
+        guard status == Z_OK else {
+            throw NSError(domain: "ZipReader", code: 1, userInfo: [NSLocalizedDescriptionKey: "inflateInit2 failed \(status)"])
+        }
+        defer { inflateEnd(&stream) }
+
+        var output = Data(count: max(expectedSize, 4096))
+        var inputBuffer = [UInt8](data)
+
+        return try inputBuffer.withUnsafeMutableBufferPointer { inPtr -> Data in
+            stream.next_in = inPtr.baseAddress
+            stream.avail_in = uInt(inputBuffer.count)
+
+            return try output.withUnsafeMutableBytes { outRaw -> Data in
+                let outPtr = outRaw.bindMemory(to: UInt8.self).baseAddress!
+                var totalOut = 0
+                var outCap = outRaw.count
+
+                while true {
+                    stream.next_out = outPtr + totalOut
+                    stream.avail_out = uInt(outCap - totalOut)
+                    status = inflate(&stream, Z_NO_FLUSH)
+                    totalOut = outCap - Int(stream.avail_out)
+
+                    if status == Z_STREAM_END { break }
+                    if status != Z_OK {
+                        throw NSError(domain: "ZipReader", code: 2, userInfo: [NSLocalizedDescriptionKey: "inflate error \(status)"])
+                    }
+                    if totalOut >= outCap {
+                        outCap *= 2
+                        var newOut = Data(count: outCap)
+                        newOut.withUnsafeMutableBytes { newRaw in
+                            outRaw.copyBytes(to: newRaw)
+                        }
+                        output = newOut
+                    } else {
+                        break
+                    }
+                }
+                return output.prefix(totalOut)
+            }
+        }
+    }
 }
 
-private struct ChatAIView: View {
-    @State private var apiKey = "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"
-    @State private var prompt = ""
-    @State private var messages: [AIChatMessage] = [
-        AIChatMessage(text: "Xin chào! Mình là Chat AI trong THANH DAT. API đã được cấu hình sẵn; hãy đặt câu hỏi nhé.", isUser: false)
-    ]
-    @State private var isSending = false
-    @State private var status = "API đã được cấu hình sẵn trong source. Không chia sẻ file này vì source chứa thông tin xác thực."
+@MainActor
+final class IPACrackVM: ObservableObject {
+    @Published var status = "Chọn file .ipa để bắt đầu."
+    @Published var busy = false
+    @Published var progress: Double = 0
+    @Published var log: [String] = []
+    @Published var zipURL: URL?
+    @Published var fileName: String = ""
+    @Published var fileSize: String = ""
+
+    func crack(ipa: URL) async {
+        busy = true; progress = 0; log.removeAll(); zipURL = nil
+        defer { busy = false }
+
+        let fm = FileManager.default
+        let access = ipa.startAccessingSecurityScopedResource()
+        defer { if access { ipa.stopAccessingSecurityScopedResource() } }
+
+        do {
+            fileName = ipa.lastPathComponent
+            let attrs = try? fm.attributesOfItem(atPath: ipa.path)
+            if let size = attrs?[.size] as? Int {
+                fileSize = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
+            }
+            append("IPA: \(fileName) (\(fileSize))")
+
+            let work = fm.temporaryDirectory.appendingPathComponent("ipacrack_\(Int(Date().timeIntervalSince1970))", isDirectory: true)
+            try? fm.removeItem(at: work)
+            try fm.createDirectory(at: work, withIntermediateDirectories: true)
+
+            let localCopy = work.appendingPathComponent(fileName)
+            if fm.fileExists(atPath: localCopy.path) { try fm.removeItem(at: localCopy) }
+            try fm.copyItem(at: ipa, to: localCopy)
+            append("Đã copy vào sandbox")
+
+            progress = 0.1
+            append("Đang giải nén IPA...")
+            let extractDir = work.appendingPathComponent("extracted", isDirectory: true)
+            let files = try ZipReader.unzip(localCopy, to: extractDir)
+            append("Giải nén xong: \(files.count) file")
+            progress = 0.45
+
+            let payloadDir = extractDir.appendingPathComponent("Payload")
+            guard fm.fileExists(atPath: payloadDir.path) else {
+                throw NSError(domain: "IPACrack", code: 1, userInfo: [NSLocalizedDescriptionKey: "Không tìm thấy Payload/ trong IPA"])
+            }
+
+            let appDirs = try fm.contentsOfDirectory(at: payloadDir, includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "app" }
+            guard let appDir = appDirs.first else {
+                throw NSError(domain: "IPACrack", code: 2, userInfo: [NSLocalizedDescriptionKey: "Không tìm thấy .app trong Payload/"])
+            }
+            append("App: \(appDir.lastPathComponent)")
+
+            let infoPlist = appDir.appendingPathComponent("Info.plist")
+            if fm.fileExists(atPath: infoPlist.path) {
+                if let dict = NSDictionary(contentsOf: infoPlist) as? [String: Any] {
+                    let bundleID = dict["CFBundleIdentifier"] as? String ?? "?"
+                    let version = dict["CFBundleShortVersionString"] as? String ?? "?"
+                    let minOS = dict["MinimumOSVersion"] as? String ?? "?"
+                    append("BundleID: \(bundleID)")
+                    append("Version: \(version)")
+                    append("MinOS: \(minOS)")
+                }
+            }
+            progress = 0.6
+
+            let binaryURL = appDir.appendingPathComponent(appDir.deletingPathExtension().lastPathComponent)
+            if fm.fileExists(atPath: binaryURL.path) {
+                let binData = try Data(contentsOf: binaryURL)
+                append("Binary: \(ByteCountFormatter.string(fromByteCount: Int64(binData.count), countStyle: .file))")
+                if let archs = detectArchitectures(binData) {
+                    append("Arch: \(archs.joined(separator: ", "))")
+                }
+                let strings = extractStrings(binData)
+                append("Strings tìm được: \(strings.count)")
+
+                let stringsURL = work.appendingPathComponent("strings.txt")
+                try strings.joined(separator: "\n").write(to: stringsURL, atomically: true, encoding: .utf8)
+
+                let headersURL = work.appendingPathComponent("binary_header.txt")
+                let headerHex = binData.prefix(4096).map { String(format: "%02x", $0) }.joined(separator: " ")
+                try headerHex.write(to: headersURL, atomically: true, encoding: .utf8)
+            }
+            progress = 0.75
+
+            let frameworksDir = appDir.appendingPathComponent("Frameworks")
+            if fm.fileExists(atPath: frameworksDir.path) {
+                let frameworks = (try? fm.contentsOfDirectory(at: frameworksDir, includingPropertiesForKeys: nil)) ?? []
+                append("Frameworks: \(frameworks.count)")
+            }
+
+            let assetsURL = appDir.appendingPathComponent("Assets.car")
+            if fm.fileExists(atPath: assetsURL.path) {
+                let size = (try? fm.attributesOfItem(atPath: assetsURL.path)[.size] as? Int) ?? 0
+                append("Assets.car: \(ByteCountFormatter.string(fromByteCount: Int64(size ?? 0), countStyle: .file))")
+            }
+
+            progress = 0.9
+
+            let outputZip = work.appendingPathComponent("\(appDir.deletingPathExtension().lastPathComponent)_src.zip")
+            append("Đang đóng gói source...")
+            try ZipWriter.zip(directory: appDir, to: outputZip, rootName: appDir.lastPathComponent)
+            zipURL = outputZip
+            progress = 1.0
+            append("HOÀN TẤT")
+            status = "Crack xong. Bấm TẢI FILE VỀ để lấy source .zip"
+        } catch {
+            status = "Lỗi: \(error.localizedDescription)"
+            append("LỖI \(error.localizedDescription)")
+        }
+    }
+
+    private func append(_ s: String) { log.append(s) }
+
+    private func detectArchitectures(_ data: Data) -> [String]? {
+        guard data.count >= 8 else { return nil }
+        let magic = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+        let beMagic = magic.byteSwapped
+        let fatMagics: [UInt32] = [0xCAFEBABE, 0xCAFEBABF, 0xBFBAFECA]
+        if fatMagics.contains(magic) || fatMagics.contains(beMagic) {
+            return ["FAT"]
+        }
+        var archs: [String] = []
+        let cpuType = data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self) }
+        let cpuSubtype = data.withUnsafeBytes { $0.load(fromByteOffset: 8, as: UInt32.self) }
+        _ = cpuSubtype
+        switch cpuType {
+        case 0x0100000C: archs.append("arm64")
+        case 0x0000000C: archs.append("armv7")
+        case 0x01000007: archs.append("x86_64")
+        case 0x00000007: archs.append("i386")
+        default: archs.append("unknown 0x\(String(cpuType, radix: 16))")
+        }
+        return archs
+    }
+
+    private func extractStrings(_ data: Data) -> [String] {
+        var results: [String] = []
+        var current = [UInt8]()
+        let minLen = 6
+
+        for byte in data {
+            if byte >= 0x20 && byte < 0x7F {
+                current.append(byte)
+            } else {
+                if current.count >= minLen {
+                    if let s = String(bytes: current, encoding: .ascii) {
+                        results.append(s)
+                    }
+                }
+                current.removeAll(keepingCapacity: true)
+            }
+            if results.count > 20000 { break }
+        }
+        if current.count >= minLen, let s = String(bytes: current, encoding: .ascii) {
+            results.append(s)
+        }
+        return results
+    }
+}
+
+struct IPACrackerView: View {
+    @StateObject private var vm = IPACrackVM()
+    @State private var showImporter = false
+    @State private var showShare = false
     private let cyan = Color(red: 0.25, green: 0.9, blue: 1)
     private let violet = Color(red: 0.63, green: 0.4, blue: 1)
+    private let orange = Color(red: 1, green: 0.6, blue: 0.25)
 
     var body: some View {
         ZStack {
-            LinearGradient(colors: [Color(red: 0.018, green: 0.025, blue: 0.07), Color(red: 0.075, green: 0.025, blue: 0.14), Color(red: 0.012, green: 0.075, blue: 0.12)], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
-            VStack(spacing: 12) {
-                HStack(spacing: 11) {
-                    Image(systemName: "sparkles").font(.system(size: 20, weight: .bold)).foregroundStyle(cyan)
-                        .frame(width: 44, height: 44).background(cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 14))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("CHAT AI").font(.system(size: 16, weight: .black, design: .rounded)).tracking(1).foregroundStyle(.white)
-                        Text("OPENAI API • THANH DAT").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(cyan)
-                    }
-                    Spacer()
-                }.padding(.horizontal, 16).padding(.top, 8)
+            LinearGradient(colors: [
+                Color(red: 0.018, green: 0.025, blue: 0.07),
+                Color(red: 0.075, green: 0.025, blue: 0.14),
+                Color(red: 0.012, green: 0.075, blue: 0.12)
+            ], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("OPENAI API KEY • ĐÃ CẤU HÌNH").font(.system(size: 10, weight: .bold, design: .rounded)).tracking(1).foregroundStyle(cyan)
-                    SecureField("OpenAI API key đã cấu hình", text: $apiKey)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .padding(12).background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
-                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(cyan.opacity(0.25), lineWidth: 1))
-                    Text("Không dùng mật khẩu ChatGPT. API tính phí riêng theo mức sử dụng.").font(.system(size: 10)).foregroundStyle(.white.opacity(0.55))
-                }.padding(13).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 16)).padding(.horizontal, 14)
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 18) {
+                    header
 
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 12) {
-                            ForEach(messages) { msg in
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("CHỌN FILE IPA").font(.system(size: 10, weight: .black, design: .rounded)).tracking(1.2).foregroundStyle(cyan)
+
+                        if vm.fileName.isEmpty {
+                            Button { showImporter = true } label: {
+                                VStack(spacing: 10) {
+                                    Image(systemName: "doc.badge.plus").font(.system(size: 34, weight: .bold)).foregroundStyle(orange)
+                                    Text("CHỌN FILE .IPA").font(.system(size: 13, weight: .black))
+                                    Text("Upload từ Files hoặc iCloud").font(.system(size: 10)).foregroundStyle(.white.opacity(0.5))
+                                }
+                                .frame(maxWidth: .infinity).padding(.vertical, 26)
+                                .background(.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 16))
+                                .overlay(RoundedRectangle(cornerRadius: 16).stroke(orange.opacity(0.4), style: StrokeStyle(lineWidth: 1.5, dash: [6])))
+                                .foregroundStyle(.white)
+                            }
+                        } else {
+                            VStack(alignment: .leading, spacing: 6) {
                                 HStack {
-                                    if msg.isUser { Spacer(minLength: 42) }
-                                    Text(msg.text)
-                                        .font(.system(size: 14))
-                                        .foregroundStyle(.white)
-                                        .padding(12)
-                                        .background(msg.isUser ? violet.opacity(0.22) : cyan.opacity(0.09), in: RoundedRectangle(cornerRadius: 15))
-                                        .overlay(RoundedRectangle(cornerRadius: 15).stroke((msg.isUser ? violet : cyan).opacity(0.25), lineWidth: 1))
-                                    if !msg.isUser { Spacer(minLength: 30) }
-                                }.id(msg.id)
+                                    Image(systemName: "shippingbox.fill").foregroundStyle(orange)
+                                    Text(vm.fileName).font(.system(size: 12, weight: .bold)).foregroundStyle(.white).lineLimit(1)
+                                    Spacer()
+                                    Button { vm.fileName = ""; vm.zipURL = nil; vm.log.removeAll(); vm.progress = 0; vm.status = "Chọn file .ipa để bắt đầu." } label: {
+                                        Image(systemName: "xmark.circle.fill").foregroundStyle(.white.opacity(0.5))
+                                    }
+                                }
+                                Text(vm.fileSize).font(.system(size: 10, design: .monospaced)).foregroundStyle(.white.opacity(0.5))
                             }
-                            if isSending {
-                                HStack { ProgressView().tint(cyan); Text("AI đang trả lời…").font(.system(size: 12)).foregroundStyle(.white.opacity(0.65)); Spacer() }
+                            .padding(14).background(.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 14))
+                        }
+
+                        Button {
+                            if vm.fileName.isEmpty { showImporter = true }
+                        } label: {
+                            EmptyView()
+                        }.hidden()
+
+                        if vm.busy || vm.progress > 0 {
+                            ProgressView(value: vm.progress).tint(orange)
+                            Text("\(Int(vm.progress * 100))%").font(.system(size: 10, design: .monospaced)).foregroundStyle(.white.opacity(0.6))
+                        }
+                    }
+                    .padding(16)
+                    .background(.ultraThinMaterial.opacity(0.65), in: RoundedRectangle(cornerRadius: 20))
+                    .overlay(RoundedRectangle(cornerRadius: 20).stroke(orange.opacity(0.18), lineWidth: 1))
+
+                    if let zip = vm.zipURL {
+                        Button { showShare = true } label: {
+                            HStack {
+                                Image(systemName: "square.and.arrow.down.fill")
+                                Text("TẢI FILE VỀ (\(zip.lastPathComponent))").font(.system(size: 12, weight: .black))
                             }
-                        }.padding(.horizontal, 14).padding(.vertical, 8)
-                    }.onChange(of: messages.count) { _ in
-                        if let last = messages.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
+                            .frame(maxWidth: .infinity).padding(14)
+                            .background(Color.green.opacity(0.18), in: RoundedRectangle(cornerRadius: 14))
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.green.opacity(0.5), lineWidth: 1))
+                            .foregroundStyle(.green)
+                        }
+                        .sheet(isPresented: $showShare) {
+                            ShareSheet(items: [zip])
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("TRẠNG THÁI").font(.system(size: 10, weight: .black)).foregroundStyle(cyan)
+                        Text(vm.status).font(.system(size: 12)).foregroundStyle(.white.opacity(0.75))
+                    }
+                    .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
+
+                    if !vm.log.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("LOG").font(.system(size: 10, weight: .black)).foregroundStyle(violet)
+                            ForEach(Array(vm.log.enumerated()), id: \.offset) { _, line in
+                                Text(line).font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.white.opacity(0.6))
+                            }
+                        }
+                        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 14))
                     }
                 }
-
-                VStack(spacing: 8) {
-                    HStack(alignment: .bottom, spacing: 8) {
-                        TextField("Nhập câu hỏi cho AI…", text: $prompt, axis: .vertical)
-                            .lineLimit(1...5).padding(12).foregroundStyle(.white)
-                            .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
-                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.1), lineWidth: 1))
-                        Button(action: sendMessage) {
-                            Image(systemName: isSending ? "hourglass" : "arrow.up")
-                                .font(.system(size: 16, weight: .black)).foregroundStyle(.black)
-                                .frame(width: 46, height: 46)
-                                .background(LinearGradient(colors: [cyan, violet], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 14))
-                        }.disabled(isSending || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            .opacity((isSending || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || apiKey.isEmpty) ? 0.45 : 1)
-                    }
-                    Text(status).font(.system(size: 10)).foregroundStyle(.white.opacity(0.5)).frame(maxWidth: .infinity, alignment: .leading)
-                }.padding(.horizontal, 14).padding(.bottom, 10)
+                .padding(18)
             }
-        }.preferredColorScheme(.dark)
-    }
-
-    private func sendMessage() {
-        let question = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !question.isEmpty, !key.isEmpty, !isSending else { return }
-        messages.append(AIChatMessage(text: question, isUser: true))
-        prompt = ""
-        isSending = true
-        status = "Đang kết nối OpenAI…"
-        Task { await requestAnswer(question: question, apiKey: key) }
-    }
-
-    @MainActor
-    private func requestAnswer(question: String, apiKey: String) async {
-        defer { isSending = false }
-        do {
-            var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
-            request.httpMethod = "POST"
-            request.timeoutInterval = 60
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            let body: [String: Any] = [
-                "model": "gpt-4.1-mini",
-                "instructions": "Bạn là trợ lý AI hữu ích. Trả lời bằng tiếng Việt nếu người dùng viết tiếng Việt.",
-                "input": question
-            ]
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse else { throw ChatAIError.invalidResponse }
-            let decoded = try JSONDecoder().decode(OpenAIResponsesResult.self, from: data)
-            guard (200...299).contains(http.statusCode) else {
-                throw ChatAIError.server(decoded.error?.message ?? "HTTP \(http.statusCode)")
+        }
+        .preferredColorScheme(.dark)
+        .navigationTitle("IPA Cracker")
+        .fileImporter(
+            isPresented: $showImporter,
+            allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .data, .archive, .data],
+            allowsMultipleSelection: false
+        ) { result in
+            do {
+                guard let url = try result.get().first else { return }
+                Task { await vm.crack(ipa: url) }
+            } catch {
+                vm.status = "Không đọc được file: \(error.localizedDescription)"
             }
-            let outputItems: [OpenAIResponsesResult.OutputItem] = decoded.output ?? []
-            let contentItems: [OpenAIResponsesResult.OutputItem.ContentItem] = outputItems.flatMap { $0.content ?? [] }
-            let texts: [String] = contentItems.compactMap { $0.text }
-            let joined: String = texts.joined(separator: "\n")
-            let answer: String = joined.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !answer.isEmpty else { throw ChatAIError.empty }
-            messages.append(AIChatMessage(text: answer, isUser: false))
-            status = "Đã nhận phản hồi từ OpenAI."
-        } catch {
-            messages.append(AIChatMessage(text: "Không thể nhận câu trả lời: \(error.localizedDescription)", isUser: false))
-            status = "Kiểm tra mạng, API key và hạn mức API."
         }
     }
 
-    private enum ChatAIError: LocalizedError {
-        case invalidResponse, empty, server(String)
-        var errorDescription: String? {
-            switch self {
-            case .invalidResponse: return "Phản hồi máy chủ không hợp lệ."
-            case .empty: return "Phản hồi không có nội dung văn bản."
-            case .server(let message): return message
+    private var header: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14).fill(orange.opacity(0.14)).frame(width: 48, height: 48)
+                Image(systemName: "shippingbox.fill").font(.system(size: 21, weight: .bold)).foregroundStyle(orange)
             }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("IPA SOURCE CRACKER").font(.system(size: 15, weight: .black, design: .rounded)).tracking(1).foregroundStyle(.white)
+                Text("UNZIP STRINGS HEADERS EXPORT").font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(orange)
+            }
+            Spacer()
         }
     }
 }
@@ -896,11 +1160,11 @@ private struct InfoUtilityView: View {
                 if kind == .about {
                     infoRow("square.grid.2x2.fill", "Trung tâm tiện ích", "Chọn chức năng từ trang chính; dùng nút quay lại để chuyển sang tiện ích khác.")
                     infoRow("paperplane.fill", "Telegram Bot", "Màn hình gửi tin nhắn giữ lại cấu hình đã lưu trên thiết bị.")
-                    infoRow("arrow.clockwise", "Khôi phục phiên", "Tác vụ Swift không tự tiếp tục sau khi iOS kết thúc app; hãy kiểm tra trạng thái trước khi chạy lại.")
+                    infoRow("shippingbox.fill", "IPA Cracker", "Giải nén IPA, trích xuất strings và header binary, đóng gói lại source.")
                 } else {
                     infoRow("key.fill", "Bot token", "Không chia sẻ token. Nếu token bị lộ, hãy thu hồi và tạo token mới qua BotFather.")
                     infoRow("externaldrive.fill", "Lưu cục bộ", "Thiết lập được lưu trên thiết bị. Bản hiện tại dùng UserDefaults, không phải kho Keychain.")
-                    infoRow("person.3.fill", "Sử dụng có trách nhiệm", "Chỉ gửi đến nhóm bạn quản lý hoặc những người đã đồng ý nhận tin; tôn trọng giới hạn Telegram.")
+                    infoRow("person.3.fill", "Sử dụng có trách nhiệm", "Chỉ phân tích IPA bạn sở hữu hoặc có quyền kiểm thử.")
                 }
                 Spacer(minLength: 0)
             }.padding(22).padding(.top, 10)
@@ -925,6 +1189,7 @@ struct ContentView: View {
     @State private var showSecurity = false
     private let cyan = Color(red: 0.25, green: 0.9, blue: 1)
     private let violet = Color(red: 0.63, green: 0.4, blue: 1)
+    private let orange = Color(red: 1, green: 0.6, blue: 0.25)
 
     var body: some View {
         NavigationStack {
@@ -946,8 +1211,8 @@ struct ContentView: View {
                             NavigationLink { TelegramMessageView().toolbar(.visible, for: .navigationBar) } label: {
                                 UtilityTile(icon: "paperplane.fill", title: "Gửi tin nhắn", subtitle: "Telegram Bot", accent: cyan, tag: "SỬ DỤNG NGAY")
                             }.buttonStyle(.plain)
-                            NavigationLink { ChatAIView().toolbar(.visible, for: .navigationBar) } label: {
-                                UtilityTile(icon: "sparkles", title: "Chat AI", subtitle: "OpenAI API", accent: violet, tag: "TRÒ CHUYỆN")
+                            NavigationLink { IPACrackerView().toolbar(.visible, for: .navigationBar) } label: {
+                                UtilityTile(icon: "shippingbox.fill", title: "Crack IPA", subtitle: "Upload .ipa → src", accent: orange, tag: "CRACK")
                             }.buttonStyle(.plain)
                             NavigationLink { WebSourceCrackerView().toolbar(.visible, for: .navigationBar) } label: {
                                 UtilityTile(icon: "network", title: "Crack Web Src", subtitle: "Tải full source", accent: Color(red: 1, green: 0.6, blue: 0.25), tag: "CRACK")
