@@ -670,7 +670,6 @@ enum ZipWriter {
         out.append(le16(UInt16(entries.count)))
         out.append(le16(UInt16(entries.count)))
         out.append(le32(UInt32(centralDirectory.count)))
-        out.append(le32(UInt32(centralDirectory.count)))
         out.append(le32(UInt32(cdOffset)))
         out.append(le16(0))
 
@@ -767,7 +766,7 @@ private struct ChatAIView: View {
                                 HStack { ProgressView().tint(cyan); Text("AI đang trả lời…").font(.system(size: 12)).foregroundStyle(.white.opacity(0.65)); Spacer() }
                             }
                         }.padding(.horizontal, 14).padding(.vertical, 8)
-                    }.onChange(of: messages.count) { _, _ in
+                    }.onChange(of: messages.count) { _ in
                         if let last = messages.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
                     }
                 }
@@ -824,10 +823,11 @@ private struct ChatAIView: View {
             guard (200...299).contains(http.statusCode) else {
                 throw ChatAIError.server(decoded.error?.message ?? "HTTP \(http.statusCode)")
             }
-            let answer = (decoded.output ?? []).flatMap { $0.content ?? [] }
-                .filter { $0.type == "output_text" || $0.text != nil }
-                .compactMap { $0.text }.joined(separator: "\n")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let outputItems: [OpenAIResponsesResult.OutputItem] = decoded.output ?? []
+            let contentItems: [OpenAIResponsesResult.OutputItem.ContentItem] = outputItems.flatMap { $0.content ?? [] }
+            let texts: [String] = contentItems.compactMap { $0.text }
+            let joined: String = texts.joined(separator: "\n")
+            let answer: String = joined.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !answer.isEmpty else { throw ChatAIError.empty }
             messages.append(AIChatMessage(text: answer, isUser: false))
             status = "Đã nhận phản hồi từ OpenAI."
