@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import UIKit
 
 struct PasterItem: Identifiable, Codable {
     var id = UUID()
@@ -8,17 +9,14 @@ struct PasterItem: Identifiable, Codable {
 
 class PasterViewModel: ObservableObject {
     @Published var items: [PasterItem] = []
-    
-    let appGroupID = "group.com.thanhdat.developer"
-    let saveKey = "saved_paster_items"
+    let saveKey = "saved_paster_items_v1"
     
     init() {
         load()
     }
     
     func load() {
-        guard let defaults = UserDefaults(suiteName: appGroupID),
-              let data = defaults.data(forKey: saveKey),
+        guard let data = UserDefaults.standard.data(forKey: saveKey),
               let decoded = try? JSONDecoder().decode([PasterItem].self, from: data) else {
             self.items = [
                 PasterItem(text: "Xin chào, mình là Đạt!"),
@@ -31,9 +29,8 @@ class PasterViewModel: ObservableObject {
     }
     
     func save() {
-        guard let defaults = UserDefaults(suiteName: appGroupID),
-              let encoded = try? JSONEncoder().encode(items) else { return }
-        defaults.set(encoded, forKey: saveKey)
+        guard let encoded = try? JSONEncoder().encode(items) else { return }
+        UserDefaults.standard.set(encoded, forKey: saveKey)
     }
     
     func add(text: String) {
@@ -51,28 +48,62 @@ struct ContentView: View {
     @StateObject private var vm = PasterViewModel()
     @State private var showAddSheet = false
     @State private var newText = ""
+    @State private var toastMessage: String? = nil
     
     private let cyan = Color(red: 0.25, green: 0.9, blue: 1)
+    private let violet = Color(red: 0.63, green: 0.4, blue: 1)
     private let panel = Color(red: 0.075, green: 0.09, blue: 0.14)
     
     var body: some View {
         NavigationStack {
             ZStack {
-                Color(red: 0.02, green: 0.025, blue: 0.05).ignoresSafeArea()
+                LinearGradient(colors: [Color(red: 0.02, green: 0.025, blue: 0.05), Color(red: 0.05, green: 0.02, blue: 0.1)], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
                 
-                List {
-                    ForEach(vm.items) { item in
-                        Text(item.text)
-                            .foregroundStyle(.white)
-                            .font(.system(size: 15))
-                            .listRowBackground(panel)
+                VStack {
+                    List {
+                        ForEach(vm.items) { item in
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(item.text)
+                                    .foregroundStyle(.white)
+                                    .font(.system(size: 15))
+                                
+                                HStack(spacing: 10) {
+                                    Button {
+                                        UIPasteboard.general.string = item.text
+                                        showToast("Đã copy! Sang Zalo ấn giữ -> Paste")
+                                    } label: {
+                                        Label("Copy", systemImage: "doc.on.doc")
+                                            .font(.system(size: 12, weight: .bold))
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 8)
+                                            .background(cyan.opacity(0.15), in: Capsule())
+                                            .foregroundStyle(cyan)
+                                    }
+                                    
+                                    Button {
+                                        UIPasteboard.general.string = item.text
+                                        openApp(urlStr: "zalo://")
+                                    } label: {
+                                        Label("Mở Zalo", systemImage: "paperplane.fill")
+                                            .font(.system(size: 12, weight: .bold))
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 8)
+                                            .background(violet.opacity(0.15), in: Capsule())
+                                            .foregroundStyle(violet)
+                                    }
+                                    
+                                    Spacer()
+                                }
+                            }
+                            .listRowBackground(Color.clear)
+                            .padding(.vertical, 8)
+                        }
+                        .onDelete(perform: vm.delete)
                     }
-                    .onDelete(perform: vm.delete)
+                    .scrollContentBackground(.hidden)
                 }
-                .scrollContentBackground(.hidden)
-                .padding(.top, 10)
             }
-            .navigationTitle("Keyboard Paster")
+            .navigationTitle("PASTER HUB")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -84,11 +115,6 @@ struct ContentView: View {
                             .font(.system(size: 18, weight: .bold))
                             .foregroundStyle(cyan)
                     }
-                }
-                ToolbarItem(placement: .principal) {
-                    Text("PASTER HUB")
-                        .font(.system(size: 14, weight: .black, design: .monospaced))
-                        .foregroundStyle(cyan)
                 }
             }
             .sheet(isPresented: $showAddSheet) {
@@ -131,7 +157,35 @@ struct ContentView: View {
                 .presentationDetents([.medium])
                 .preferredColorScheme(.dark)
             }
+            .overlay(alignment: .bottom) {
+                if let msg = toastMessage {
+                    Text(msg)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(cyan, in: Capsule())
+                        .padding(.bottom, 40)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
         }
         .preferredColorScheme(.dark)
+    }
+    
+    func showToast(_ msg: String) {
+        withAnimation { toastMessage = msg }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            withAnimation { toastMessage = nil }
+        }
+    }
+    
+    func openApp(urlStr: String) {
+        guard let url = URL(string: urlStr) else { return }
+        if UIApplication.shared.canOpenURL(url) {
+            UIApplication.shared.open(url)
+        } else {
+            showToast("Chưa cài app Zalo trên máy!")
+        }
     }
 }
