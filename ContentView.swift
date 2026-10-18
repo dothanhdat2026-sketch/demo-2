@@ -149,7 +149,7 @@ struct ContentView: View {
                                 }
                                 showAddSheet = false
                             }
-                            .font(.bold)
+                            .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(cyan)
                         }
                     }
