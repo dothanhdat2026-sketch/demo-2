@@ -182,10 +182,12 @@ struct ContentView: View {
     
     func openApp(urlStr: String) {
         guard let url = URL(string: urlStr) else { return }
-        if UIApplication.shared.canOpenURL(url) {
-            UIApplication.shared.open(url)
-        } else {
-            showToast("Chưa cài app Zalo trên máy!")
+        UIApplication.shared.open(url, options: [:]) { success in
+            if !success {
+                DispatchQueue.main.async {
+                    self.showToast("Chưa cài app Zalo trên máy!")
+                }
+            }
         }
     }
 }
